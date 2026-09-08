@@ -1,5 +1,5 @@
 {
-	"name": "schedule-viewer-lcd7b (ESP-IDF v5.5 / ESP32-S3-Touch-LCD-7B)",
+	"name": "schedule-viewer-esp32s3 (ESP-IDF v5.5 / ESP32-S3-Touch-LCD-7B)",
 	"dockerComposeFile": [
 		"docker-compose.yml"
 	],

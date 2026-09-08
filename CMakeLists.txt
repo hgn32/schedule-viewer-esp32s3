@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-project(schedule-viewer-lcd7b)
+project(schedule-viewer-esp32s3)
 
 # 日本語TTF(fonts/MPLUS1-ExtraBold.ttf)をfontパーティションへ書き込む。
 # SDカードが無い基板なのでフォントはフラッシュに生のまま置き、

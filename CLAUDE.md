@@ -1,4 +1,4 @@
-# schedule-viewer-lcd7bプロジェクトルール
+# schedule-viewer-esp32s3プロジェクトルール
 
 Waveshare ESP32-S3-Touch-LCD-7B(ESP32-S3-WROOM-1-N16R8、7インチ1024x600 IPS、
 RGB565パラレル16bit。基板を90度回して縦置き・論理600x1024で使う)に、

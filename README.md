@@ -1,4 +1,4 @@
-# schedule-viewer-lcd7b
+# schedule-viewer-esp32s3
 
 Waveshare ESP32-S3-Touch-LCD-7B(7インチ1024×600 IPS、RGB565パラレル16bit)の
 LCDに、Outlook予定表を6時間分のタイムライン表示するビューアです。
