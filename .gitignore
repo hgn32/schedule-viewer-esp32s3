@@ -1,0 +1,33 @@
+# --- ESP-IDF ---------------------------------------------------------------
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+# dependencies.lockは再現性のため意図的に追跡する
+
+# --- VSCode ----------------------------------------------------------------
+.vscode/github-accounts.json
+.vscode/c_cpp_properties.json
+.vscode/settings.local.json
+
+# --- PC側スクリプトの実行時ファイル ----------------------------------------
+config.json
+output.txt
+filter_words.txt
+__pycache__/
+
+# --- 資格情報 --------------------------------------------------------------
+# Wi-FiのSSID/パスワードとAPIのURLを含む。main/secrets.h.exampleを雛形に各自で作る。
+main/secrets.h
+
+# --- devcontainer(USB/IP) --------------------------------------------------
+# 逆トンネルを張る開発者ごとの公開鍵。各自が自分の鍵を置くのでリポジトリには含めない。
+# 置き方はREADMEの「実機接続(USB/IP)」節の事前準備3を参照。
+.devcontainer/authorized_keys
+
+# --- 実機ログ --------------------------------------------------------------
+# Windows側で書き込み・監視した出力がsshでここへ流れ込む(tools/win_flash.py)。
+logs/
+
+# 書き込み要求の受け渡しに使うFIFO(tools/win-agent.shが作る)。
+.win-request

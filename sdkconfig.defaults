@@ -1,0 +1,55 @@
+# idf.py set-target esp32s3 で生成されるsdkconfigの初期値。
+# 直接sdkconfigを編集せず、恒久的な変更はこのファイルに書いてsdkconfigを作り直す。
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- フラッシュ (ESP32-S3-WROOM-1-N16R8: 16MB QIO) --------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# --- パーティション --------------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- PSRAM (ESP32-S3-WROOM-1-N16R8: 8MB Octal) ------------------------------
+# RGB LCD表示中にフラッシュアクセスが割り込むと画面が乱れるため、
+# 命令とrodataをPSRAMへ退避する(Waveshare公式サンプルと同じ設定)。
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+
+# --- コンソール / プロトコル用UART ----------------------------------------
+# PC(scheduler_sender.py)との通信もESP_LOGの出力も同じUART0 115200bpsに乗る
+# (USB-TO-UARTポートに出る)。PC側は完全一致で"REQ:ALL"だけを拾うため、
+# ログが混ざっても実害は無い。
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# --- TLS (予定取得APIのHTTPS) ---------------------------------------------
+# サーバ証明書は*.asahi-kasei.co.jp ← GlobalSign RSA OV SSL CA 2018 ←
+# GlobalSign Root CA - R3。いずれもESP-IDF同梱の公的CAバンドルに含まれるので、
+# 証明書をアプリへ埋め込まずesp_crt_bundleで検証する。
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# TLSのレコード長。既定の16KBは内蔵RAMを圧迫するので入出力を分けて絞る。
+# サーバが16KBのフラグメントを送ってくる場合はIN側を戻すこと。
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# --- ランタイム ------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+# TLSハンドシェイクはmainタスクのスタック上で走る。8192では足りない。
+# さらにFreeTypeのラスタライザがスタックを大きく使う(46pxの描画で16384では
+# スタックオーバーフローして再起動する。旧M5Paper版で2026-09-01に実機で確認)ため
+# 32768にする。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

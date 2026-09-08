@@ -1,0 +1,7 @@
+{
+    "idf.currentSetup": "/opt/esp/idf",
+    "idf.adapterTargetName": "esp32s3",
+    "idf.flashType": "UART",
+    "idf.port": "/dev/ttyUSB0",
+    "idf.monitorBaudRate": "115200"
+}

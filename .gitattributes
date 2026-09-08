@@ -1,0 +1,11 @@
+# devcontainer内(Linux)で実行するシェルスクリプトやCMakeがCRLFになると壊れるため、
+# このリポジトリはワークツリーも含めてLFに統一する。
+* text=auto eol=lf
+
+# Windows側で動かすバッチはCRLFにする。cmd.exeはLFだけのバッチでgotoやラベルの
+# 扱いを誤ることがある。またcmd.exeは.batをCP932として読むため、中身はASCIIのみにする。
+*.bat text eol=crlf
+
+*.jpg binary
+*.png binary
+*.bin binary

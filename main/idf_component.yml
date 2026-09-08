@@ -1,0 +1,15 @@
+## ESPコンポーネントレジストリ/gitからの依存。初回ビルド時にmanaged_components/へ展開される。
+dependencies:
+  ## LovyanGFXはESPコンポーネントレジストリに無いのでgit依存で取り込む。
+  ## esp_lcdのRGBパネル(フレームバッファ)をPanel_FrameBufferBase派生で包み、
+  ## LGFX_Deviceとして扱う(lcd_panel.cpp)。
+  lovyangfx:
+    git: https://github.com/lovyan03/LovyanGFX.git
+    version: "1.2.28"
+  ## ESP-IDF v6.0はLovyanGFXが依然として使うレガシーI2Cドライバ(driver/i2c.h)を
+  ## 削除したため、追従できるまでv5系に固定する。
+  idf:
+    version: ">=5.1,<6.0"
+  ## 日本語TTF(フラッシュのfontパーティション)を描画するためのFreeType。
+  ## LovyanGFX単体はTTFを読めない。
+  espressif/freetype: "^2.14"

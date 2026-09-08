@@ -1,0 +1,8 @@
+{
+	// ESP32-S3自体はUSB-Serial/JTAGを内蔵するが、この基板(ESP32-S3-Touch-LCD-7B)の
+	// ネイティブUSBポートでJTAGが使えるかは未検証のためオンチップデバッグは設定していない。
+	// 不具合の切り分けはESP_LOG*と`idf.py monitor`で行う。
+	// (旧設定はcar-tracker由来のESP32-C6専用gdbtargetだったため削除した)
+	"version": "0.2.0",
+	"configurations": []
+}

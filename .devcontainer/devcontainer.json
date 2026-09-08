@@ -1,0 +1,71 @@
+{
+	"name": "schedule-viewer-lcd7b (ESP-IDF v5.5 / ESP32-S3-Touch-LCD-7B)",
+	"dockerComposeFile": [
+		"docker-compose.yml"
+	],
+	"service": "workspace",
+	"workspaceFolder": "/workspaces",
+
+	// イメージの標準ユーザー。Dockerfile側でUID/GID 1000の"ubuntu"を必ず用意し
+	// (dialout所属済み)、ホストのユーザーと一致させている。
+	// これでコンテナが生成したbuild/ やsdkconfigをホストからも編集できる。
+	"remoteUser": "ubuntu",
+
+	"shutdownAction": "stopCompose",
+
+	// USB/IP用: コンテナ内sshd(127.0.0.1:2222)をWindows側のlocalhostへ転送する。
+	// Windowsから`ssh -N devcontainer`でここへ接続し、逆トンネルで3240を運ぶ。
+	// 手順はREADMEの「実機接続(USB/IP)」節を参照。
+	"forwardPorts": [2222],
+	"portsAttributes": {
+		"2222": {
+			"label": "devcontainer sshd (逆トンネル受け口)",
+			"onAutoForward": "silent"
+		}
+	},
+
+	// 初回作成時にidf.py set-target esp32s3まで済ませ、managed_components/を取得する。
+	// 失敗してもコンテナ作成自体は止めない(ネットワーク不通でも中に入れるようにする)。
+	"postCreateCommand": "bash .devcontainer/post-create.sh",
+
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"idf.espIdfPath": "/opt/esp/idf",
+				"idf.toolsPath": "/opt/esp",
+				"idf.gitPath": "/usr/bin/git",
+				// バージョン名入りのvenvへのシンボリックリンク(Dockerfileで作成)。
+				// IDFのタグを上げてもこのパスは変わらない。
+				"idf.pythonInstallPath": "/opt/esp/python_env/current/bin/python",
+				"idf.adapterTargetName": "esp32s3",
+				// 書き込みは基板のUSB-TO-UARTポート経由。
+				// ESP32-S3のUSB-JTAGがこの基板で使えるかは未検証。
+				"idf.flashType": "UART",
+				"idf.port": "/dev/ttyUSB0",
+				"idf.portWin": "COM3",
+				"idf.monitorBaudRate": "115200",
+				"C_Cpp.intelliSenseEngine": "disabled",
+				"clangd.arguments": [
+					"--compile-commands-dir=${workspaceFolder}/build",
+					"--background-index",
+					// IDF 5.xの統合ツールチェーン名はxtensa-esp-elf。
+					"--query-driver=/opt/esp/tools/xtensa-esp-elf/**/bin/xtensa-esp32s3-elf-*"
+				],
+				"files.eol": "\n",
+				"[c]": {
+					"editor.formatOnSave": false
+				},
+				"[cpp]": {
+					"editor.formatOnSave": false
+				}
+			},
+			"extensions": [
+				"espressif.esp-idf-extension",
+				"llvm-vs-code-extensions.vscode-clangd",
+				"bierner.markdown-mermaid",
+				"Anthropic.claude-code"
+			]
+		}
+	}
+}

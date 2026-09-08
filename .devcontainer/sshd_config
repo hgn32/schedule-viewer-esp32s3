@@ -1,0 +1,16 @@
+# Windowsからの逆トンネル(ssh -R 3240)を受けるためだけのsshd。
+# コンテナのloopbackにのみ口を開き、VS Codeのポート転送(2222)越しに接続される。
+Port 2222
+ListenAddress 127.0.0.1
+AllowUsers ubuntu
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthorizedKeysFile .ssh/authorized_keys
+# Windowsからの`ssh -R`トンネル(3240=usbipd)を切れにくくする
+ClientAliveInterval 30
+ClientAliveCountMax 4
+
+# scpに必要。OpenSSH 9系のscpは内部でSFTPを使うため、これが無いと
+# "subsystem request failed on channel 0"で転送できない。
+# Windows側のwin-agent.ps1が成果物を取得するのに使う。
+Subsystem sftp /usr/lib/openssh/sftp-server

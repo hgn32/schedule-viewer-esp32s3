@@ -1,0 +1,45 @@
+# このファイルのカレントディレクトリは".devcontainer/"
+# version:はCompose v2以降では不要(指定すると警告が出る)
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      args:
+        # ターゲットはesp32s3。LovyanGFXがレガシーI2Cドライバを使うため
+        # ESP-IDFはv5系に固定する(v6.0で削除済み)。
+        DOCKER_TAG: ${DOCKER_TAG:-v5.5}
+    environment:
+      ###claude
+      CLAUDE_CONFIG_DIR: /home/ubuntu/.claude
+      IDF_CCACHE_ENABLE: "1"
+      # USB/IP(SSHリバースポートフォワード方式): USBIP_HOSTはSSHトンネルの出口。
+      # Windowsからこのコンテナのsshdへ張った`ssh -R 3240`の口はコンテナ自身の
+      # loopbackに開くので、attach/list/detachはすべてコンテナ内から127.0.0.1へ繋ぐ。
+      USBIP_HOST: ${USBIP_HOST:-127.0.0.1}
+      USBIP_BUSID: ${USBIP_BUSID:-}
+    working_dir: /workspaces
+    privileged: true
+    init: true
+    tty: true
+    volumes:
+      - ../:/workspaces:cached
+      # 基板のUSB-TO-UARTポート(ブリッジチップ名は未確認)は/dev/ttyUSB0として見える。
+      # 基板はWindows PCに挿さっていて、このコンテナはネットワーク越しの
+      # 別のLinuxマシンで動く。usbip attachはコンテナ内で実行するが、実体の
+      # vhci_hcdはホストLinuxのカーネルなので、デバイスはホストの/devに生える。
+      # このバインドマウントでコンテナからもそのまま見える。手順は
+      # .devcontainer/usb-attach.shとREADMEの「実機接続(USB/IP)」節を参照。
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - claude-config:/home/ubuntu/.claude
+      # 逆トンネルを張るWindowsの公開鍵。再ビルド無しで差し替えられるようbindする
+      # (ファイル単位bindはinode固定なので、編集は追記`>>`か上書き`>`で行うこと。
+      # rename方式で保存するエディタやsed -iの変更はコンテナ側へ反映されない)。
+      - ./authorized_keys:/home/ubuntu/.ssh/authorized_keys:ro
+    # 逆トンネルの受け口sshd(loopbackのみ)を起動してから待機する
+    command: sh -c "/usr/sbin/sshd -f /etc/ssh/sshd_config && exec sleep infinity"
+
+volumes:
+  claude-config:
+    driver: local
