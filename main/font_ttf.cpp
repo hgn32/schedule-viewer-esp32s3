@@ -7,7 +7,6 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "esp_partition.h"
 
 #include "ft2build.h"
@@ -288,21 +287,6 @@ static inline uint16_t blendPixel565(int cov, int fore_r, int fore_g, int fore_b
 // PSRAMだとキャッシュ経由のアクセスが遅く効果が薄れるため)。
 // 確保に失敗したらnullptrを返す。呼び出し側は従来のdrawPixel()経路へ
 // フォールバックすること。
-// 一時的な内訳計測。FreeTypeのラスタライズと転送のどちらが重いかを切り分ける。
-// 切り分けが済んだら撤去する。
-static uint64_t s_ft_us   = 0;
-static uint64_t s_blit_us = 0;
-
-void fontTtfProfileReset() {
-    s_ft_us   = 0;
-    s_blit_us = 0;
-}
-
-void fontTtfProfileGet(uint32_t* ft_us, uint32_t* blit_us) {
-    if (ft_us != nullptr) *ft_us = (uint32_t)s_ft_us;
-    if (blit_us != nullptr) *blit_us = (uint32_t)s_blit_us;
-}
-
 static uint16_t* ensureGlyphBuf(size_t px) {
     if (px == 0) return nullptr;
     if (s_glyph_buf != nullptr && s_glyph_buf_px >= px) return s_glyph_buf;
@@ -393,9 +377,7 @@ void fontTtfDrawText(LovyanGFX* gfx, const std::string& str, int x, int y, int p
             cov_base  = s_glyph_cache_arena + cached->cov_offset;
             cov_pitch = w;
         } else {
-            const int64_t ft0 = esp_timer_get_time();
             int ft_rc = FT_Load_Char(s_face, code, FT_LOAD_RENDER);
-            s_ft_us += (uint64_t)(esp_timer_get_time() - ft0);
             if (ft_rc != 0) continue;
 
             const FT_GlyphSlot slot = s_face->glyph;
@@ -432,7 +414,6 @@ void fontTtfDrawText(LovyanGFX* gfx, const std::string& str, int x, int y, int p
                 }
             }
         } else {
-            const int64_t b0 = esp_timer_get_time();
             for (int row = 0; row < h; row++) {
                 const unsigned char* src = cov_base + (size_t)row * cov_pitch;
                 for (int col = 0; col < w; col++) {
@@ -441,7 +422,6 @@ void fontTtfDrawText(LovyanGFX* gfx, const std::string& str, int x, int y, int p
                 }
             }
             gfx->pushImage(gx, gy, w, h, (const lgfx::rgb565_t*)buf);
-            s_blit_us += (uint64_t)(esp_timer_get_time() - b0);
         }
 
         pen_x += advance;

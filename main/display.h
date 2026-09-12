@@ -47,15 +47,6 @@ public:
     // 仮の予定(is_tentative)は明滅の対象にしない(枠色と破線だけで示す)。
     void tickBlink(uint32_t now_utc, uint32_t now_ms);
 
-    // 描画時間のオーバーレイ表示。ダミーモードなど、開発時にだけ有効にする。
-    // 有効にすると画面左下に直前の描画時間を小さく出す。
-    void setPerfOverlay(bool enabled);
-
-    // 画面の内容をログへ出す(一時的なデバッグ機能)。
-    // 縦横それぞれ1/2に間引いた300x512のRGB565をBase64で1行1ラインずつ出す。
-    // 開発用。サーバ到達性が確認できたら撤去する。
-    void dumpScreenshot();
-
 private:
     struct BoxRect {
         int x = 0, y = 0, w = 0, h = 0;
@@ -109,9 +100,6 @@ private:
     // スプライトの指定矩形だけをLCDへ転送する。
     void pushRect(int x, int y, int w, int h);
 
-    // 描画時間オーバーレイ(画面左下)。_perf_overlayがfalseなら何もしない。
-    void drawPerfOverlay();
-
     static int   nowLineY();
     static float pxPerSec() { return (float)TIMELINE_H / (DISP_HOURS * 3600); }
     static int   clockRectW();
@@ -138,8 +126,6 @@ private:
     static const int FS_TICK   = 20;
     static const int FS_CLOCK  = 56;
     static const int FS_EVENT  = 14;
-    // 描画時間オーバーレイの文字サイズ(一時的なデバッグ表示)。
-    static const int FS_PERF   = 14;
 
     // 点滅の総時間と半周期。半周期ごとにフェーズを反転する。
     static const uint32_t BLINK_DURATION_MS    = 5000;
@@ -171,9 +157,4 @@ private:
 
     std::vector<EmphasisRecord> _emphasis_history;
     std::vector<BlinkEntry>     _blinks;
-
-    // ─ 描画時間オーバーレイ(一時的なデバッグ表示) ─
-    bool     _perf_overlay   = false;
-    uint32_t _last_render_us = 0; // renderTimeline()全体
-    uint32_t _last_push_us   = 0; // pushSprite()だけ
 };

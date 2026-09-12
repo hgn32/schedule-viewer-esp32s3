@@ -47,7 +47,3 @@ int fontTtfCachedTextWidth(const std::string& str);
 void fontTtfDrawCachedText(LovyanGFX* gfx, const std::string& str, int x, int y,
                            uint32_t fore_rgb888, uint32_t back_rgb888,
                            lgfx::textdatum_t datum);
-
-// 一時的な内訳計測(FreeTypeのラスタライズ時間と転送時間)。切り分け用で、済んだら撤去する。
-void fontTtfProfileReset();
-void fontTtfProfileGet(uint32_t* ft_us, uint32_t* blit_us);

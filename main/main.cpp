@@ -9,7 +9,6 @@
 #include "esp_timer.h"
 
 #include "display.h"
-#include "dummy_schedule.h"
 #include "http_client.h"
 #include "io_ext.h"
 #include "json_parser.h"
@@ -18,27 +17,17 @@
 #include "schedule.h"
 #include "secrets.h"
 #include "serial_link.h"
-#include "sntp_time.h"
 #include "time_util.h"
 #include "touch.h"
 #include "wifi_link.h"
 
 static const char* TAG = "main";
 
-// secrets.hでUSE_DUMMY_SCHEDULEを1にすると、HTTP取得を行わずダミー予定を表示する。
-// サーバへ到達できない環境での暫定手段。到達性が確認できたら撤去する。
-#if !defined(USE_DUMMY_SCHEDULE)
-#define USE_DUMMY_SCHEDULE 0
-#endif
-
 // Wi-Fi接続を待つ上限。接続確立後、切断からの再接続を待つ側で使う。
 // 社内APは認証に時間がかかることがあるので長めに取る。
 static const uint32_t WIFI_TIMEOUT_MS = 20000;
 // 起動時に候補を1つ試すときの上限。候補が複数あるので短めにして次候補へ早く移る。
 static const uint32_t WIFI_CANDIDATE_TIMEOUT_MS = 15000;
-// SNTPの同期待ち。10秒では実機でタイムアウトすることがあったため長めに取る
-// (名前解決とNTPの往復を含む。失敗しても表示は続けるので待つ側に倒す)。
-static const uint32_t SNTP_TIMEOUT_MS = 25000;
 // HTTPS 1回あたりの上限。TLSハンドシェイクを含む。
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 // 取得に失敗したときの再試行間隔。POLL_INTERVAL_SEC(既定300)より短くする。
@@ -50,14 +39,6 @@ static const uint8_t BACKLIGHT_PERCENT = 80;
 // タイムライン全体の再描画は重いので、分の変わり目(秒=0)を避けてこの秒へずらす。
 // 00秒には時計の部分更新だけを行い、時計が止まって見えないようにする。
 static const int TIMELINE_REDRAW_SEC = 5;
-
-#if USE_DUMMY_SCHEDULE
-// ダミーモードのときだけ使う。最初のタイムライン描画からこの時間後に
-// スクリーンショットをログへ出し、以後もこの間隔で繰り返す(一時的なデバッグ機能。
-// サーバ到達性が確認できたら撤去する)。繰り返すのは、監視を繋いでいない間に
-// 起きた再描画の計測値を画面のオーバーレイ経由で読み取れるようにするため。
-static const uint32_t SCREENSHOT_INTERVAL_MS = 20000;
-#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -74,12 +55,6 @@ static uint32_t nextAlignedUtc(uint32_t now, uint32_t step_sec) {
 static bool fetchSchedule(ScheduleStore* store) {
     if (store == nullptr) return false;
 
-#if USE_DUMMY_SCHEDULE
-    // サーバへ到達できない環境向けの暫定経路。HTTPは一切呼ばない。
-    // 時刻はSNTPが入れたシステム時刻をそのまま使うので、ここではsetSystemTime()を呼ばない。
-    ESP_LOGW(TAG, "ダミーモード: サーバへは接続していない");
-    return parseScheduleJson(dummyScheduleJson(nowUtc()), store, nullptr);
-#else
     if (!wifiLinkIsConnected() && !wifiLinkWaitConnected(WIFI_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "Wi-Fi未接続のため取得を見送る");
         return false;
@@ -110,7 +85,6 @@ static bool fetchSchedule(ScheduleStore* store) {
         setSystemTime(new_time);
     }
     return true;
-#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,10 +134,6 @@ extern "C" void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
-
-#if USE_DUMMY_SCHEDULE
-    display.setPerfOverlay(true);
-#endif
 
     display.showBootMessage("Wi-Fi接続中...");
 
@@ -239,17 +209,7 @@ extern "C" void app_main(void) {
         wifiLinkGetSsid(ssid, sizeof(ssid));
         ESP_LOGI(TAG, "Wi-Fi接続完了 SSID=%s IP=%s", ssid, ip);
 
-#if USE_DUMMY_SCHEDULE
-        // ダミーモードにはRTCどころかサーバ時刻すら無いので、Wi-Fi接続直後にSNTPで
-        // 実時刻を取る。失敗しても表示自体は続ける(時刻がずれるだけ)。
-        esp_err_t serr = sntpSyncTime(SNTP_TIMEOUT_MS);
-        if (serr != ESP_OK) {
-            ESP_LOGW(TAG, "SNTP同期に失敗した(続行する): %s", esp_err_to_name(serr));
-        }
-        display.showBootMessage("ダミーデータ表示中");
-#else
         display.showBootMessage("スケジュール取得中...");
-#endif
     }
 
     // 初回は接続の成否にかかわらず1度試す(失敗ならシリアル待機に落ちる)。
@@ -266,10 +226,6 @@ extern "C" void app_main(void) {
     // 誤動作を防ぐためのフラグ。新しいタッチが始まるたび(Press発生時)に
     // falseへ戻すので、次のタッチでは通常どおりLongTapが効く。
     bool     suppress_longtap = false;
-#if USE_DUMMY_SCHEDULE
-    // 最初のタイムライン描画時刻(ms、esp_timer基準)とスクリーンショット出力済みか。
-    uint32_t rendered_at_ms    = 0;
-#endif
 
     // サーバ経路が使えないときの保険として、PC(scheduler_sender.py)からの
     // シリアル受信も残してある。到達性が確認できたら撤去してよい。
@@ -313,9 +269,6 @@ extern "C" void app_main(void) {
                     display.renderTimeline(store, nowUtc());
                     last_minute = (int)(nowUtc() / 60);
                     rendered    = true;
-#if USE_DUMMY_SCHEDULE
-                    rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
-#endif
                 } else {
                     // 2回目以降はTIMELINE_REDRAW_SECまで遅らせる。取得はX:00境界に
                     // 揃うため、ここで即描くと結局00秒に重い処理が重なってしまう。
@@ -347,19 +300,6 @@ extern "C" void app_main(void) {
 
             // 3. 明滅。開始はBLINK_START_DELAY_MSだけ遅れるので00秒には重ならない。
             display.tickBlink(now, (uint32_t)(esp_timer_get_time() / 1000));
-
-#if USE_DUMMY_SCHEDULE
-            // 最初のタイムライン描画からSCREENSHOT_INTERVAL_MSごとに繰り返し出す
-            // (一時的なデバッグ機能)。
-            {
-                uint32_t elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000) - rendered_at_ms;
-                if (elapsed_ms >= SCREENSHOT_INTERVAL_MS) {
-                    ESP_LOGI(TAG, "スクリーンショットを出力する");
-                    display.dumpScreenshot();
-                    rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
-                }
-            }
-#endif
         }
 
         // LOOP_TICK_MS待って行が来なければfalse。ここがループの唯一の待ち。
@@ -382,9 +322,6 @@ extern "C" void app_main(void) {
                 display.renderTimeline(store, nowUtc());
                 last_minute = (int)(nowUtc() / 60);
                 rendered    = true;
-#if USE_DUMMY_SCHEDULE
-                rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
-#endif
             } else {
                 // 2回目以降はTIMELINE_REDRAW_SECまで遅らせ、00秒への集中を避ける。
                 timeline_dirty = true;

@@ -6,11 +6,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "mbedtls/base64.h"
-
 #include "font_ttf.h"
 #include "lcd_panel.h"
 #include "time_util.h"
@@ -222,10 +217,34 @@ void Display::showBootMessage(const std::string& msg) {
     _emphasis_history.clear();
     _blinks.clear();
 
+    // fontTtfDrawText()は1行ぶんしか描かない(改行を解釈せず、グリフとして
+    // 描こうとして豆腐になる)。ここで行に分けてから1行ずつ中央へ置く。
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (;;) {
+        size_t nl = msg.find('\n', start);
+        if (nl == std::string::npos) {
+            lines.push_back(msg.substr(start));
+            break;
+        }
+        lines.push_back(msg.substr(start, nl - start));
+        start = nl + 1;
+    }
+
+    int line_h = fontTtfLineHeight(FS_BOOT);
+    if (line_h <= 0) line_h = FS_BOOT + 8;
+    const int total_h = line_h * (int)lines.size();
+    int y = SCR_H / 2 - total_h / 2 + line_h / 2;
+
     _gfx->startWrite();
     _canvas.fillScreen(COLOR_BG);
-    fontTtfDrawText(&_canvas, msg, SCR_W / 2, SCR_H / 2, FS_BOOT, COLOR_TEXT, COLOR_BG,
-                    lgfx::textdatum_t::middle_center);
+    for (const auto& line : lines) {
+        if (!line.empty()) {
+            fontTtfDrawText(&_canvas, line, SCR_W / 2, y, FS_BOOT, COLOR_TEXT, COLOR_BG,
+                            lgfx::textdatum_t::middle_center);
+        }
+        y += line_h;
+    }
     _canvas.pushSprite(_gfx, 0, 0);
     _gfx->endWrite();
 }
@@ -247,26 +266,6 @@ void Display::pushRect(int x, int y, int w, int h) {
     _gfx->setClipRect(nx, ny, nw, nh);
     _canvas.pushSprite(_gfx, 0, 0);
     _gfx->clearClipRect();
-}
-
-void Display::setPerfOverlay(bool enabled) {
-    _perf_overlay = enabled;
-}
-
-void Display::drawPerfOverlay() {
-    if (!_perf_overlay) return;
-    if (_gfx == nullptr) return;
-
-    char buf[64];
-    snprintf(buf, sizeof(buf), "R:%ums P:%ums",
-             (unsigned)(_last_render_us / 1000), (unsigned)(_last_push_us / 1000));
-
-    const int y = SCR_H - FS_PERF - 6;
-    _canvas.fillRect(0, y, 200, FS_PERF + 6, COLOR_BG);
-    fontTtfDrawText(&_canvas, buf, 4, SCR_H - 4, FS_PERF, COLOR_MUTED_TEXT, COLOR_BG,
-                    lgfx::textdatum_t::bottom_left);
-
-    pushRect(0, y, 200, FS_PERF + 6);
 }
 
 void Display::drawClock(const std::string& time_str) {
@@ -515,9 +514,6 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
         return false;
     }
 
-    const int64_t render_start_us = esp_timer_get_time();
-    fontTtfProfileReset(); // 一時的な内訳計測
-
     _last_display_start_utc = display_start_utc;
     _last_display_end_utc   = display_end_utc;
 
@@ -528,15 +524,10 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
     new_history.reserve(layout.size());
 
     _gfx->startWrite();
-    // 内訳の計測(一時的。オーバーレイが有効なときだけログへ出す)。
-    const int64_t t0_us = esp_timer_get_time();
     _canvas.fillScreen(COLOR_BG);
-    const int64_t t1_us = esp_timer_get_time();
 
     drawHeader(jst_now, now_utc);
-    const int64_t t2_us = esp_timer_get_time();
     drawHourGrid(display_start_utc, display_end_utc);
-    const int64_t t3_us = esp_timer_get_time();
 
     for (const auto& le : layout) {
         uint32_t key       = eventKey(le.event);
@@ -553,35 +544,14 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
     }
     _emphasis_history = std::move(new_history);
 
-    const int64_t t4_us = esp_timer_get_time();
     drawNowLineFull();
 
-    const int64_t push_start_us = esp_timer_get_time();
     _canvas.pushSprite(_gfx, 0, 0);
-    const int64_t push_end_us = esp_timer_get_time();
     _gfx->endWrite();
-
-    _last_push_us   = (uint32_t)(push_end_us - push_start_us);
-    _last_render_us = (uint32_t)(push_end_us - render_start_us);
 
     _has_rendered   = true;
     _last_signature = sig;
     _last_clock_str = formatClockStr(now_utc);
-
-    drawPerfOverlay();
-
-    // 画面のオーバーレイだけでは1点しか読めないため、毎回の再描画でログにも出す。
-    if (_perf_overlay) {
-        uint32_t ft_us = 0, blit_us = 0;
-        fontTtfProfileGet(&ft_us, &blit_us);
-        ESP_LOGI(TAG, "文字内訳 FreeType=%ums 転送=%ums", (unsigned)(ft_us / 1000),
-                (unsigned)(blit_us / 1000));
-        ESP_LOGI(TAG, "描画 R=%ums P=%ums 予定%u件 (背景%ums ヘッダ%ums 目盛%ums 予定枠%ums)",
-                (unsigned)(_last_render_us / 1000), (unsigned)(_last_push_us / 1000),
-                (unsigned)layout.size(),
-                (unsigned)((t1_us - t0_us) / 1000), (unsigned)((t2_us - t1_us) / 1000),
-                (unsigned)((t3_us - t2_us) / 1000), (unsigned)((t4_us - t3_us) / 1000));
-    }
 
     return true;
 }
@@ -615,62 +585,4 @@ void Display::tickBlink(uint32_t now_utc, uint32_t now_ms) {
             i++;
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// スクリーンショット出力(一時的なデバッグ機能。サーバ到達性が確認できたら撤去する)。
-
-void Display::dumpScreenshot() {
-    if (_gfx == nullptr) return;
-
-    // 出力画像は論理座標基準で横300(=SCR_W/2)、縦512(=SCR_H/2)。
-    static const int OUT_W = SCR_W / 2;
-    static const int OUT_H = SCR_H / 2;
-
-    const uint16_t* buf = (const uint16_t*)_canvas.getBuffer();
-    if (buf == nullptr) {
-        ESP_LOGW(TAG, "スプライトのバッファが取得できないためスクリーンショットを中止する");
-        return;
-    }
-
-    // 1行ぶんの生データ(300画素=600バイト)とBase64文字列(800文字+終端)。
-    // app_main()のスタックを圧迫しないようstaticに置く。
-    static uint8_t row_raw[OUT_W * 2];
-    static char    row_b64[((OUT_W * 2 + 2) / 3) * 4 + 1];
-
-    ESP_LOGI(TAG, "SHOT BEGIN %d %d", OUT_W, OUT_H);
-
-    for (int oy = 0; oy < OUT_H; oy++) {
-        const int y = oy * 2; // 論理y(縦を1/2に間引く)
-
-        for (int ox = 0; ox < OUT_W; ox++) {
-            const int x = ox * 2; // 論理x(横を1/2に間引く)
-
-            // スプライトは生の向き(1024x600、LCD_PHYS_W x LCD_PHYS_H)で確保し、
-            // setRotation(LCD_ROTATION=1)を掛けて論理座標(600x1024)で描いている。
-            // pushRect()が使っている回転1の変換(nx = SCR_H - (y + h)、ny = x)を
-            // 1画素(w=h=1)に当てはめると、生座標は raw_x = SCR_H - 1 - y、
-            // raw_y = x になる。生バッファは幅LCD_PHYS_W(1024)の行優先(row-major)
-            // で確保されているので、raw_yが行、raw_xが列となり、
-            // index = raw_y * LCD_PHYS_W + raw_x = x * LCD_PHYS_W + (SCR_H - 1 - y)。
-            const int index = x * LCD_PHYS_W + (SCR_H - 1 - y);
-            const uint16_t px = buf[index];
-            row_raw[ox * 2 + 0] = (uint8_t)(px & 0xFF);
-            row_raw[ox * 2 + 1] = (uint8_t)((px >> 8) & 0xFF);
-        }
-
-        size_t out_len = 0;
-        int err = mbedtls_base64_encode((unsigned char*)row_b64, sizeof(row_b64), &out_len,
-                                        row_raw, sizeof(row_raw));
-        if (err != 0) {
-            ESP_LOGW(TAG, "Base64エンコードに失敗した(行%d、err=%d)", oy, err);
-        } else {
-            ESP_LOGI(TAG, "SHOT %d %s", oy, row_b64);
-        }
-
-        // ウォッチドッグに引っかからないよう1行ごとに他タスクへ譲る。
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-
-    ESP_LOGI(TAG, "SHOT END");
 }

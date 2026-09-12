@@ -82,43 +82,6 @@ Wi-Fi接続または取得に失敗した場合は、USBシリアル経由の受
 GT911のI2Cバス共有・アドレスなどハードウェア寄りの背景は
 `docs/implementation-notes.md`の決定事項16を参照してください。
 
-## ダミー予定の表示(一時的)
-
-社内サーバ(`SCHEDULE_URL`)へ到達できない環境で画面を確認するための暫定手段です。
-`serial_link` / `protocol` / `pc_python`と同じ扱いのフォールバックで、**サーバへの
-到達性が確認できたら`main/dummy_schedule.cpp/.h`と`main/sntp_time.cpp/.h`ごと撤去します。**
-
-切り替えは`main/secrets.h`の`USE_DUMMY_SCHEDULE`マクロで行います
-(`secrets.h`はgit追跡外なので、この切り替え自体は差分に現れません)。1のときは
-`fetchSchedule()`がHTTP GETを一切行わず、`main/dummy_schedule.cpp`の
-`dummyScheduleJson()`が`now_utc`基準の相対時刻で組み立てたJSONを直接`parseScheduleJson()`
-へ渡します。件名の先頭には必ず`[ダミー]`が付き、ダミー表示中であることが画面上で常に
-分かるようにしています。
-
-RTCが無く、通常はサーバ応答のHTTP Date(またはJSON本文)から時刻を得ているため、
-ダミーモードではその時刻源がありません。そこで**ダミーモードのときだけ**、Wi-Fi接続
-成功直後に`main/sntp_time.cpp`の`sntpSyncTime()`でSNTP(既定`pool.ntp.org`、
-`secrets.h`の`SNTP_SERVER`で変更可)から実時刻を取得してシステムクロックに反映します。
-通常モードでは従来どおりHTTP Dateヘッダ(またはJSON本文)のみを使い、SNTPは呼びません。
-
-`main/dummy_schedule.cpp`の`dummyScheduleJson()`は、専用のデモコードを持たず、
-既存の強調・明滅の仕組み(`emphasisLevel()`の閾値`EMPH_L1_SEC`/`EMPH_L2_SEC`/`EMPH_L3_SEC`)を
-そのまま踏ませる形で、`now_utc`基準の開始時刻を各しきい値の直前に置いています。
-
-| # | 内容 | 開始(`now_utc`起点) |
-|---|---|---|
-| 1 | 進行中の予定 | -1800秒 〜 +1800秒 |
-| 2 | L3(赤、開始2分前以下)の確認用 | +110秒 〜 +2600秒 |
-| 3 | L2(橙、開始5分前以下)の確認用 | +280秒 〜 +3000秒 |
-| 4 | L1(黄、開始10分前以下)の確認用 | +580秒 〜 +3400秒 |
-| 5 | 遠い時間帯の予定(12時間タイムラインの見た目確認用) | +21600秒 〜 +25200秒 |
-| 6 | さらに遠い予定 | +36000秒 〜 +39600秒 |
-| 7 | 中止済み(除外経路の確認用) | +7200秒 〜 +9000秒 |
-| 8 | 終日(除外経路の確認用) | その日のUTC日境界 |
-
-2〜4は開始時刻が重なるように意図して配置しており、`layoutEvents()`の列分割(横に並べる処理)も
-同時に確認できます。重なりを避ける方向には調整していません。
-
 ## 通信プロトコル(サーバ → デバイス)
 
 `SCHEDULE_URL`へ`Accept: application/json`付きでGETし、200番のJSONを解釈します。
@@ -388,37 +351,6 @@ FreeTypeのラスタライズが203ms、実際の転送(`pushImage()`)は23msで
 `_gfx`は生座標系のため、`Display::pushRect()`が論理座標(x, y, w, h)を
 `nx = SCR_H - (y + h)`、`ny = x`、`nw = h`、`nh = w`という式(LovyanGFXの回転1相当の
 変換)で生座標へ直してから`setClipRect()`に渡す。呼び出し側は常に論理座標を渡せばよい。
-
-### 描画時間オーバーレイ(一時的なデバッグ表示)
-
-`Display::setPerfOverlay(true)`を呼ぶと、`renderTimeline()`実行後に画面左下へ
-`R:{ms}ms P:{ms}ms`(Rは`renderTimeline()`全体、Pは`pushSprite()`だけ)を14pxで
-小さく表示する。ログが取れない環境で描画時間を実測するための手段で、
-`main.cpp`では`USE_DUMMY_SCHEDULE`のときだけ有効にしている。
-
-- 前回と画面内容が完全一致して何も描かない経路(署名一致)では計測も表示も行わない
-  (計測値を壊さないため)。
-- オーバーレイ自体の描画・転送にかかる時間は計測対象に含まない。
-- **撤去条件**: 回転まわりの高速化など、描画性能の作業が一段落し実測が不要になった時点で
-  `Display::setPerfOverlay()`呼び出しと`drawPerfOverlay()`ごと削除する。
-
-### スクリーンショット出力(一時的なデバッグ機能)
-
-こちらからデバイスの画面を確認する手段が無いため、`Display::dumpScreenshot()`は
-スプライトの内容を縦横それぞれ1/2に間引いた300×512のRGB565として、1行ずつ
-Base64化して`ESP_LOG*`(`SHOT`で始まる行)へ出す。`main.cpp`では
-`USE_DUMMY_SCHEDULE`のときだけ、最初のタイムライン描画から20秒後に1回だけ呼ぶ。
-
-- 出力形式: `SHOT BEGIN 300 512` → `SHOT <行番号0〜511> <Base64>`を512行 →
-  `SHOT END`
-- 論理座標(x, y)は`Display::pushRect()`の回転1変換をw=h=1に当てはめた
-  `index = x * LCD_PHYS_W + (SCR_H - 1 - y)`でスプライトの生バッファから直接読む
-  (スプライトは生の向き1024×600で確保し、論理座標は600×1024のため)
-- ホスト側では`tools/screenshot.py`が`logs/monitor.log`から`SHOT`行を拾い、
-  RGB565→RGB888へ展開してPNG(zlib圧縮)に復元する
-- **撤去条件**: サーバ到達性が確認でき、ダミーモード自体
-  (`main/dummy_schedule.cpp/.h`、`main/sntp_time.cpp/.h`)が撤去できる時点で、
-  `Display::dumpScreenshot()`と`tools/screenshot.py`ごと削除する
 
 ### 時刻管理
 

@@ -16,11 +16,6 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
 USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)は、サーバへの
 到達性が実機で確認できるまでフォールバックとして残してある。確認が取れたら撤去してよい。
 
-同様に、`main/secrets.h`の`USE_DUMMY_SCHEDULE`を1にすると、HTTP取得を行わず
-`main/dummy_schedule.cpp`が組み立てるダミー予定を表示する(サーバへ到達できない環境向けの
-一時的な仕組み)。`secrets.h`はgit追跡外なので、この切り替え自体は差分に現れない。
-確認が取れたら`main/dummy_schedule.cpp/.h`と`main/sntp_time.cpp/.h`ごと撤去してよい。
-
 言語は**C++**、フレームワークは**ESP-IDF v5.5**。ビルドはdevcontainer内でのみ行う。
 
 ## ディレクトリ構成
@@ -31,9 +26,7 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 | `main/wifi_link.cpp/.h` | Wi-Fi(STA / WPA2-PSK)接続。複数候補から、スキャン結果を見て選んで接続する。タイムアウトと再接続上限つき |
 | `main/http_client.cpp/.h` | `esp_http_client`でHTTPS GET。`esp_crt_bundle`で証明書検証。リダイレクトは追わない |
 | `main/json_parser.cpp/.h` | cJSONでレスポンスを`Event`へ変換。**実スキーマ未確定のため候補表で複数の形を受ける** |
-| `main/dummy_schedule.cpp/.h` | **一時的。** `USE_DUMMY_SCHEDULE=1`のときにHTTP取得の代わりに使うダミー予定のJSON生成。到達性が確認できたら撤去する |
-| `main/sntp_time.cpp/.h` | **一時的。** ダミーモードのときだけ使うSNTP時刻同期。到達性が確認できたら撤去する |
-| `main/secrets.h` | SSID/パスワード/URL/ポーリング間隔/`USE_DUMMY_SCHEDULE`。**git追跡外**。雛形は`secrets.h.example` |
+| `main/secrets.h` | SSID/パスワード/URL/ポーリング間隔。**git追跡外**。雛形は`secrets.h.example` |
 | `main/serial_link.cpp/.h` | UART0(115200bps)の行単位送受信。Arduinoの`Serial`を置き換えた層(フォールバック) |
 | `main/protocol.cpp/.h` | PC↔デバイス間のテキストプロトコル解釈。**トランスポート非依存の純粋な解析**に保つ(フォールバック) |
 | `main/schedule.cpp/.h` | 予定データの保持と期間フィルタ。**外部依存の無い純粋なデータ構造**に寄せる |
@@ -57,7 +50,6 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 | `.devcontainer/flash.ps1` | Windows側で1回だけ手実行する版(自動化を使わない場合のフォールバック) |
 | `tools/win_flash.py` | Windows側で走る書き込み(esptool起動)とシリアル監視。出力を1行ずつsshで`logs/`へ流す |
 | `tools/stage-winflash.sh` | Windowsへ渡す一式(esptool・pyserial・intelhex・成果物)を`build/winflash/`へまとめる |
-| `tools/screenshot.py` | **一時的。** `logs/monitor.log`の`SHOT`行(`Display::dumpScreenshot()`が出す)からPNGを復元するホスト側スクリプト。ダミーモードのときだけ使う開発用。到達性が確認できたら`Display::dumpScreenshot()`ごと撤去する |
 | `logs/` | 実機のログ置き場(`build.log` / `flash.log` / `monitor.log` / `win.log`)。**git追跡外** |
 
 `main/CMakeLists.txt`は`main/*.cpp`を`GLOB_RECURSE`しているので、
