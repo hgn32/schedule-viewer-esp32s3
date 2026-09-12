@@ -22,8 +22,8 @@
 |---|---|---|
 | 画面が紫がかる/ネガポジに見える | LovyanGFXの`rgb565_2Byte`は**バイトスワップ済み**形式。`esp_lcd`のRGBパネルはネイティブ順を期待する | 色深度を**`rgb565_nonswapped`**にする |
 | 全画面転送が異常に遅い(実測832ms) | スプライトとフレームバッファの向きが違うと`pushSprite()`が回転転送になり、61万画素がPSRAMのキャッシュラインをまたぐ | **スプライトをパネルと同じ生の向きで確保**し、回転はスプライト側に持たせる |
-| 書き込み中にCOMポートが消える | CH422Gの`USB_SEL`(bit5)がHighだとネイティブUSBがCAN側へ切り替わる | `USB_SEL`を**常にLow**に保つ |
-| I2Cが常に`unexpected nack` | **CH422GはACKを返さない** | `i2c_device_config_t.flags.disable_ack_check = 1` |
+| 書き込み中にCOMポートが消える | CH32V003の`USB_SEL`(bit5)がHighだとネイティブUSBがCAN側へ切り替わる | `USB_SEL`を**常にLow**に保つ |
+| I2Cが常に`unexpected nack` | **CH32V003はACKを返さない** | `i2c_device_config_t.flags.disable_ack_check = 1` |
 
 ---
 
@@ -52,7 +52,7 @@ cfg.hsync_gpio_num = 46;
 cfg.vsync_gpio_num = 3;
 cfg.de_gpio_num    = 5;
 cfg.pclk_gpio_num  = 7;
-cfg.disp_gpio_num  = -1;   // DISPはCH422G経由なのでGPIOでは制御しない
+cfg.disp_gpio_num  = -1;   // DISPはCH32V003経由なのでGPIOでは制御しない
 
 // data[0..4]=B3..B7, [5..10]=G2..G7, [11..15]=R3..R7
 const int data_pins[16] = {14, 38, 18, 17, 10, 39, 0, 45, 48, 47, 21, 1, 2, 42, 41, 40};
@@ -150,17 +150,18 @@ _canvas.pushSprite(_gfx, 0, 0);
 
 ---
 
-## 4. CH422G(IOエキスパンダ / I2C)
+## 4. CH32V003(IOエキスパンダ / I2C)
 
 **最大の罠。「アドレス+レジスタ番号」形式のチップではない。**
 用途ごとにI2Cアドレスが違い、**各アドレスへ1バイトだけ書く**。
 
 | 用途 | I2Cアドレス(7bit) | 内容 |
 |---|---|---|
-| モード設定(WR_SET) | `0x24` | bit0=1でIO0〜IO7を出力にする |
-| IO出力(WR_IO) | `0x38` | 出力値8bit |
-| OC出力(WR_OC) | `0x23` | OC0〜OC3 |
-| IO入力(RD_IO) | `0x26` | 読み出し |
+| モード | `0x24` | `0x02` | `0xFF`でIO0〜IO7を出力にする |
+| IO出力 | `0x24` | `0x03` | 出力値8bit |
+| IO入力 | `0x24` | `0x04` | 読み出し(書いた値がそのまま読み戻せる) |
+| PWM | `0x24` | `0x05` | **バックライト輝度(0〜255)** |
+| ADC | `0x24` | `0x06` | 電池電圧 |
 
 SDA=GPIO8 / SCL=GPIO9 / 400kHz。
 
@@ -173,39 +174,40 @@ SDA=GPIO8 / SCL=GPIO9 / 400kHz。
 ### 公式デモが実際に書いている値
 
 ```c
-// バックライトON
-write(0x24, 0x01);  write(0x38, 0x1E);
-// バックライトOFF
-write(0x24, 0x01);  write(0x38, 0x1A);
-// タッチリセット
-write(0x24, 0x01);  write(0x38, 0x2C);  delay(100ms);
-                    write(0x38, 0x2E);  delay(200ms);
+// 初期化(全ピン出力 → 出力値)
+write2(0x24, 0x02, 0xFF);
+write2(0x24, 0x03, 0x1E);
+// バックライト輝度(0=消灯、247=97%が上限)
+write2(0x24, 0x05, pwm);
+// バックライト消灯(PWMを0にしたうえでDISP=IO2も落とす)
+write2(0x24, 0x05, 0x00);
+write2(0x24, 0x03, 0x1A);
 ```
 
-**独自の値を書かないこと。** `0xFF`や`0xDF`(bit0/6/7も立てた値)を書くと
-**画面が真っ黒になる**ことを実機で確認済み。`0x1E`から外れるのは`LCD_BL`のbit2だけにする。
+**出力値は`0x1E`を基準にし、そこから動かすのは用途のビットだけにする。**
+とくに`bit5`(USB_SEL)を立てるとネイティブUSBがCAN側へ切り替わり、
+**書き込み経路もログ取得も失われる**。
 
 ### 守るべき3点
 
-1. **出力(`0x38`)の前に毎回モード(`0x24`)を書く。** 公式も呼び出しのたびに
-   `0x24`→`0x38`の順で書いている。初期化時だけでは足りない。
+1. **モード(`0x02`)は初期化時に一度だけ書けばよい。** 公式デモの`IO_EXTENSION_Init()`も
+   `{0x02, 0xFF}`を一度書くだけで、以降は`{0x03, 値}`を書いている。
 2. **`USB_SEL`(bit5)は常にLow。** Highにするとネイティブ USBがCAN側へ切り替わり、
    **書き込み経路もログ取得も失われる**。CANを使わないなら上げさせないガードを入れる。
-3. **ACK検査を切る。** CH422GはACKを返さない。公式デモは戻り値を一切見ていない。
-   新しい`i2c_master`ドライバではこうする。
+3. **ACK検査は切らない。** CH32V003は`0x24`でACKを返す(I2Cスキャンで確認済み)。
+   切ると書き込み失敗が一切ログに出なくなる。
 
 ```c
 i2c_device_config_t dev_cfg = {};
 dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-dev_cfg.device_address  = 0x38;
+dev_cfg.device_address  = 0x24;        // 7Bに存在するのはこのアドレスだけ
 dev_cfg.scl_speed_hz    = 400000;
-dev_cfg.flags.disable_ack_check = 1;   // これが無いと毎回ESP_ERR_INVALID_STATE
 ```
 
-### PWM調光はできない
+### PWM調光はできる
 
-**CH422Gに調光機能は無い。** バックライトはbit2のON/OFFのみ。
-段階調光が要るなら別の経路を探すこと(未調査)。
+レジスタ`0x05`へ0〜255を書くと輝度が変わる。上限はWaveshare公式デモと
+ESPHomeの`waveshare_io_ch32v003`がどちらも247(=97%)にしている。
 
 ---
 
@@ -283,8 +285,8 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y   # 主コンソールにする
 | 試したこと | 結果 |
 |---|---|
 | `bounce_buffer_size_px = 0` | **画面が真っ黒**。戻すこと |
-| CH422Gの出力に`0xFF` / `0xDF`を書く | **画面が真っ黒**。`0x1E`系から外れない |
-| `0x24`へ`{レジスタ番号, 値}`の2バイトを書く | モードレジスタが壊れる。CH422Gは1バイト |
+| IO出力に`0xFF` / `0xDF`を書く | **画面が真っ黒**。`0x1E`から外れるのは用途のビットだけにする |
+| `0x24`へ`{レジスタ番号, 値}`の2バイトを書く | モードレジスタが壊れる。CH32V003は1バイト |
 | `EXIO5`をHighのままにする | アプリ起動と同時にCOMポートが消える |
 | 副コンソールでログを読む | 無音。主コンソールにする必要がある |
 | CH343(`USB TO UART`)側から書き込む | `No serial data received`。原因未特定 |

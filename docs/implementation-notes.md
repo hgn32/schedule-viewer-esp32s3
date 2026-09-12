@@ -39,7 +39,8 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 | `main/schedule.cpp/.h` | 予定データの保持と期間フィルタ。**外部依存の無い純粋なデータ構造**に寄せる |
 | `main/display.cpp/.h` | LovyanGFXによるLCD描画(タイムラインUI)。スプライトへ描いてフレームバッファへ転送 |
 | `main/lcd_panel.cpp/.h` | `esp_lcd`のRGBパネル初期化と、LovyanGFXの`LGFX_Device`ラッパー |
-| `main/io_ext.cpp/.h` | IO拡張チップ(CH422G、I2C)。バックライト・各リセット・USB/CAN切替の出力制御。**扱いに癖があるので決定事項15を読むこと** |
+| `main/io_ext.cpp/.h` | IO拡張チップ(CH32V003、I2C 0x24)。バックライト・各リセット・USB/CAN切替の出力制御。**扱いに癖があるので決定事項15を読むこと** |
+| `main/touch.cpp/.h` | タッチIC(GT911)からの読み出しと、タップ/ロングタップ判定。座標は使わず押下の有無だけ見る。**決定事項16を読むこと** |
 | `main/font_ttf.cpp/.h` | FreeTypeで`font`パーティション上のTTFを描く層 |
 | `fonts/` | `font`パーティションへ書き込むTTF(`MPLUS1-Medium.ttf`)とそのライセンス(`OFL.txt`) |
 | `main/text_util.cpp/.h` | 件名・場所の正規化(全角→半角、半角カナ→全角カナ) |
@@ -138,10 +139,38 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
     `CONFIG_SPIRAM_RODATA`を有効にしている。** RGB表示中にフラッシュアクセスが
     走ると画面が乱れる対策で、命令・読み出し専用データをPSRAM上へ再配置する。
     外すと表示が乱れる可能性がある。
-15. **IO拡張チップはCH422G。** 用途ごとにI2Cアドレスが違い(モード0x24 / IO出力0x38)、
-    各アドレスへ1バイトだけ書く。「アドレス+レジスタ番号」形式ではない。
-    **公式デモの値(`0x1E`/`0x1A`)から外れた値を書かないこと**(画面が真っ黒になる)。
-    **出力bit5(USB_SEL)は必ずLow**(HighにするとネイティブUSBが切り離され、
-    書き込みもログ取得もできなくなる)。**ACK検査は切る**(CH422GはACKを返さない)。
-    バックライトはON/OFFのみで**PWM調光はできない**。
-    詳細は`docs/waveshare-esp32s3-7b-display.md`。
+15. **IO拡張チップはCH32V003(MCU)。CH422Gではない。** 7(末尾Bなし)はCH422Gだが、
+    7Bでは別チップに置き換わっている。単一アドレス`0x24`へ`{レジスタ番号, 値}`の
+    2バイトを書く形式で、レジスタは`0x02`=モード(0xFFで全ピン出力)、`0x03`=IO出力、
+    `0x04`=IO入力、`0x05`=バックライトPWM、`0x06`=ADC。
+    ビット割り当てはIO1=TP_RST、IO2=バックライト(DISP)、IO3=LCD_RST、IO4=SD_CS、
+    IO5=USB(0)/CAN(1)で、出力の基準値は`0x1E`。
+    **`bit5`(USB_SEL)は必ずLowに保つ**(HighにするとネイティブUSBがCAN側へ切り替わり、
+    書き込みもログ取得もできなくなる)。**ACK検査は切らない**(CH32V003はACKを返す)。
+    **`0x38`に応答するデバイスは存在しない。** CH422Gのコマンド体系(アドレスごとに
+    1バイト)で書いていた時期があり、バックライトの消灯が一切効かなかった。
+    書き込みが効いているかは`0x04`の読み戻しで確認できる(書いた値がそのまま返る)。
+    **PWM調光ができる**(`0x05`へ0〜255。上限は公式デモとESPHomeに合わせて247=97%)。
+
+16. **タッチはGT911を`espressif/esp_lcd_touch_gt911`で読む。LovyanGFXのタッチ層
+    (`Touch_GT911`)は使わない。** GT911はIO拡張チップ(CH32V003)と同じI2Cバス
+    (SDA=GPIO8 / SCL=GPIO9、`io_ext.cpp`が`i2c_new_master_bus()`で確保済み)に
+    ぶら下がっており、`ioExtGetBus()`でバスハンドルを共有する
+    (`esp_lcd_new_panel_io_i2c()`は`i2c_master_bus_handle_t`を渡すとv2実装が選ばれる)。
+    **LovyanGFXのタッチ層はレガシーI2Cドライバ(`driver/i2c.h`)を使うため、
+    `io_ext.cpp`が使う新I2Cドライバ(`driver/i2c_master.h`)と同じピンを二重に
+    初期化することになり衝突する。** これを避けるため`main/touch.cpp`は
+    `esp_lcd_touch_gt911`コンポーネントを直接使う。GT911のI2Cアドレスは
+    **0x5D**(実機のI2Cスキャンで確認済み。電源投入時のINTレベルで0x5D/0x14が
+    決まる仕様だが、この基板では0x5D固定で読めている)。TP_RSTはIO拡張のIO1で、
+    起動時の出力値`0x1E`で既にHigh(リセット解除済み)のため、
+    `esp_lcd_touch_config_t.rst_gpio_num`は`GPIO_NUM_NC`にする。INTはGPIO4だが
+    ポーリングで読むため`int_gpio_num`も`GPIO_NUM_NC`。
+    **`espressif__esp_lcd_touch_gt911`(1.2.1)が提供する
+    `ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG()`マクロは使わない。** このマクロは
+    指示付き初期化子の並び順が古い`esp_lcd_panel_io_i2c_config_t`の宣言順を
+    前提にしており、ESP-IDF v5.5の実際の宣言順(`dev_addr`の次が
+    `on_color_trans_done`/`user_ctx`)と食い違うため、C++では指示付き初期化子の
+    順序違反としてビルドエラーになる。`main/touch.cpp`ではメンバへ個別代入している。
+    座標(`esp_lcd_touch_get_data()`)は取得できるが使わない。タップ/ロングタップの
+    判定仕様(1500ms、誤動作対策)は`docs/spec.md`。

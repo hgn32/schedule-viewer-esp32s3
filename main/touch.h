@@ -20,6 +20,9 @@ static const uint32_t TOUCH_LONG_TAP_MS = 1500;
 bool touchBegin();
 
 // 現在のタッチ状態を読み、状態遷移からイベントを返す。メインループから
-// 定期的に呼ぶこと。1回のタッチ(押してから離すまで)につき、Pressか
-// LongTapのどちらか一方しか返さない(離すまで残りは常にNone)。
+// 定期的に呼ぶこと。1回のタッチ(押してから離すまで)で返るのは、押し始めの
+// Press(1回)と、押し続けた場合のLongTap(1回)だけで、それ以外は常にNoneを返す。
+// Pressの直後に同じタッチのLongTapが続くことがあるので、呼び出し側は
+// 「Pressで行った操作を、同じタッチのLongTapで取り消してしまわないか」を
+// 必ず確認すること(main.cppのsuppress_longtapがその抑制にあたる)。
 TouchEvent touchPoll();

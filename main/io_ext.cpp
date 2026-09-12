@@ -1,6 +1,5 @@
 #include "io_ext.h"
 
-#include "driver/i2c_master.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -11,71 +10,66 @@ static const char* TAG = "io_ext";
 // Waveshare ESP32-S3-Touch-LCD-7Bの基板配線。
 static const gpio_num_t IO_EXT_SDA      = GPIO_NUM_8;
 static const gpio_num_t IO_EXT_SCL      = GPIO_NUM_9;
+static const uint16_t   IO_EXT_ADDR     = 0x24;
 static const uint32_t   IO_EXT_FREQ_HZ  = 400000;
 static const int        IO_EXT_TIMEOUT_MS = 100;
 
-// IO拡張チップはCH422G。用途ごとにI2Cアドレスが違い、各アドレスへ1バイトだけ書く
-// (「アドレス+レジスタ番号」形式のチップではない)。
-static const uint16_t CH422G_ADDR_MODE = 0x24; // モード設定(WR_SET)
-static const uint16_t CH422G_ADDR_OUT  = 0x38; // IO0〜IO7の出力(WR_IO)
+// IO拡張チップはCH32V003(MCU)。CH422Gではない。
+// 単一のI2Cアドレス0x24に対して{レジスタ番号, 値}の2バイトを書く形式で、
+// 用途ごとにアドレスを変えるCH422Gとは互換性が無い。
+static const uint8_t REG_MODE   = 0x02; // ピンの入出力方向。0xFFで全ピン出力
+static const uint8_t REG_IO_OUT = 0x03; // IO0〜IO7の出力値(8bitシャドウ)
+static const uint8_t REG_IO_IN  = 0x04; // IO0〜IO7の入力値
+static const uint8_t REG_PWM    = 0x05; // バックライトのPWM値(0〜255)
 
-// モード。bit0を立てるとIO0〜IO7が出力になる。
-static const uint8_t CH422G_MODE_IO_OUTPUT = 0x01;
+static const uint8_t MODE_ALL_OUTPUT = 0xFF;
 
-// 出力値はWaveshare公式デモ(ESP32-S3-Touch-LCD-7-Demo/ESP-IDF/08_lvgl_Porting/
-// main/waveshare_rgb_lcd_port.cのwavesahre_rgb_lcd_bl_on/off)の実測値をそのまま使う。
-// 0x1E = 0b0001_1110。bit1〜bit4だけHighで、bit0・bit5・bit6・bit7はLow。
-// bit2がバックライト(DISP)で、消すときは0x1A(bit2だけ落とす)。
-// bit5はUSB_SEL(HighでCAN、LowでネイティブUSB)。公式もLowで固定しており、
-// Highにするとアプリ起動と同時にCOMポートが消えて書き込みもログ取得もできなくなる。
-//
-// 独自に0xFFや0xDF(bit0/6/7も立てた値)を書くと画面が真っ黒になることを実機で確認済み
-// (2026-09-12)。公式の値から外れた値を書かないこと。
-static const uint8_t OUTPUT_BL_ON  = 0x1E;
-static const uint8_t OUTPUT_BL_OFF = 0x1A;
+// 出力の初期値。bit1〜bit4だけHighで、bit0・bit5・bit6・bit7はLow。
+// bit5はUSB_SEL(HighでCAN、LowでネイティブUSB)。Highにするとアプリ起動と同時に
+// COMポートが消えて書き込みもログ取得もできなくなるため、必ずLowで保つ。
+// USB_SEL(bit5)だけLowで、残りは全てHigh。IO0・IO6・IO7の用途は7Bの資料で
+// 確認できていないが、電源投入直後の既定はプルアップでHighとみられる。
+// 0x1E(IO0・IO6・IO7をLowにする値。末尾Bなしの7の資料由来)を書いたところ
+// 画面が真っ暗になったため、Low側へ落とすのはUSB_SELだけにする。
+static const uint8_t OUTPUT_DEFAULT = 0xDF;
 
-static const uint8_t EXIO_LCD_BL  = 2; // bit2。バックライト(DISP)
+static const uint8_t EXIO_LCD_BL  = 2; // bit2。バックライト(DISP)のイネーブル
 static const uint8_t EXIO_USB_SEL = 5; // bit5。LowでネイティブUSB、HighでCAN
 
-static i2c_master_bus_handle_t s_bus      = nullptr;
-static i2c_master_dev_handle_t s_dev_mode = nullptr;
-static i2c_master_dev_handle_t s_dev_out  = nullptr;
-static uint8_t                 s_output_shadow = OUTPUT_BL_ON;
+// バックライトPWMの上限。Waveshare公式デモとESPHomeのコンポーネントが
+// どちらも247(=97%)を上限にしている。
+static const uint8_t BACKLIGHT_MAX_PERCENT = 97;
 
-// 指定アドレスのデバイスへ1バイト書く。
-// 実機ログでNACKが1回だけ出て以降の書き込みが失敗する事例があったため、
+static i2c_master_bus_handle_t s_bus = nullptr;
+static i2c_master_dev_handle_t s_dev = nullptr;
+static uint8_t                 s_output_shadow = OUTPUT_DEFAULT;
+
+// {レジスタ番号, 値}の2バイトを書く。
 // 失敗時は2msだけ待って同じ値をもう1回だけ送り直す(2回目も失敗したらそのまま返す)。
-// これで直るかは未検証。
-static esp_err_t writeByte(i2c_master_dev_handle_t dev, uint8_t value) {
-    if (dev == nullptr) return ESP_ERR_INVALID_STATE;
+static esp_err_t writeReg(uint8_t reg, uint8_t value) {
+    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
 
-    esp_err_t err = i2c_master_transmit(dev, &value, 1, IO_EXT_TIMEOUT_MS);
+    uint8_t buf[2] = {reg, value};
+
+    esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), IO_EXT_TIMEOUT_MS);
     if (err == ESP_OK) return err;
 
-    ESP_LOGW(TAG, "I2C書き込みに失敗した(%s)。2ms待って1回だけ再送する",
-            esp_err_to_name(err));
+    ESP_LOGW(TAG, "レジスタ0x%02Xへの書き込みに失敗した(%s)。2ms待って1回だけ再送する",
+            reg, esp_err_to_name(err));
     vTaskDelay(pdMS_TO_TICKS(2));
-    return i2c_master_transmit(dev, &value, 1, IO_EXT_TIMEOUT_MS);
+    return i2c_master_transmit(s_dev, buf, sizeof(buf), IO_EXT_TIMEOUT_MS);
 }
 
-static esp_err_t addDevice(uint16_t addr, i2c_master_dev_handle_t* out) {
+// レジスタを1バイト読む。書き込みが効いているかの確認に使う。
+static esp_err_t readReg(uint8_t reg, uint8_t* out) {
+    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
     if (out == nullptr) return ESP_ERR_INVALID_ARG;
 
-    i2c_device_config_t dev_cfg = {};
-    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-    dev_cfg.device_address  = addr;
-    dev_cfg.scl_speed_hz    = IO_EXT_FREQ_HZ;
-    // CH422GはACKを返さない。ACK検査を有効にしたままだと書き込みが成立していても
-    // i2c_master_transmit()がESP_ERR_INVALID_STATEを返し、ログもエラーで埋まる。
-    // Waveshare公式デモも同じ書き込みの戻り値を一切見ておらず、それで
-    // バックライトもタッチリセットも動いている(2026-09-12に実機のログで確認)。
-    dev_cfg.flags.disable_ack_check = 1;
-
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, out);
+    return i2c_master_transmit_receive(s_dev, &reg, 1, out, 1, IO_EXT_TIMEOUT_MS);
 }
 
 esp_err_t ioExtBegin() {
-    if (s_dev_out != nullptr) return ESP_OK;
+    if (s_dev != nullptr) return ESP_OK;
 
     i2c_master_bus_config_t bus_cfg = {};
     bus_cfg.i2c_port          = I2C_NUM_0;
@@ -91,48 +85,56 @@ esp_err_t ioExtBegin() {
         return err;
     }
 
-    err = addDevice(CH422G_ADDR_MODE, &s_dev_mode);
+    // CH32V003はACKを返す(I2Cスキャンで0x24が応答することを実機で確認済み)。
+    // ACK検査は有効のままにして、書き込み失敗をログに出せるようにする。
+    i2c_device_config_t dev_cfg = {};
+    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_cfg.device_address  = IO_EXT_ADDR;
+    dev_cfg.scl_speed_hz    = IO_EXT_FREQ_HZ;
+
+    err = i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "モード用デバイスの登録に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "IO拡張チップのデバイス登録に失敗: %s", esp_err_to_name(err));
         i2c_del_master_bus(s_bus);
         s_bus = nullptr;
         return err;
     }
 
-    err = addDevice(CH422G_ADDR_OUT, &s_dev_out);
+    // CH32V003はESP32とは別MCUで、ESP32のリセットでは設定が消えない。
+    // 前回の起動で書いた値が残るので、毎回ここで明示的に既知の状態へ戻す。
+    err = writeReg(REG_MODE, MODE_ALL_OUTPUT);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "出力用デバイスの登録に失敗: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev_mode);
-        s_dev_mode = nullptr;
-        i2c_del_master_bus(s_bus);
-        s_bus = nullptr;
+        ESP_LOGE(TAG, "モードレジスタの設定に失敗: %s", esp_err_to_name(err));
         return err;
     }
-
-    // 順番に意味がある。出力モードにしてから出力値を書く。
-    err = writeByte(s_dev_mode, CH422G_MODE_IO_OUTPUT);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "出力モードの設定に失敗: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    // モード切替直後に立て続けに書くとNACKされている可能性があるため、
-    // 出力値の書き込みまで少し待つ(これで直るかは未検証)。
     vTaskDelay(pdMS_TO_TICKS(2));
 
-    s_output_shadow = OUTPUT_BL_ON;
-    err = writeByte(s_dev_out, s_output_shadow);
+    s_output_shadow = OUTPUT_DEFAULT;
+    err = writeReg(REG_IO_OUT, s_output_shadow);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "出力値の初期化に失敗: %s", esp_err_to_name(err));
         return err;
     }
+    vTaskDelay(pdMS_TO_TICKS(10));
 
-    ESP_LOGI(TAG, "CH422Gを初期化した(出力=0x%02X、USB_SELはLow)", s_output_shadow);
+    // LCD_RST(IO3)をパルスして液晶を初期化し直す。lcdPanelBegin()より前に行う。
+    writeReg(REG_IO_OUT, (uint8_t)(s_output_shadow & ~(1u << 3)));
+    vTaskDelay(pdMS_TO_TICKS(20));
+    writeReg(REG_IO_OUT, s_output_shadow);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    uint8_t readback = 0;
+    if (readReg(REG_IO_IN, &readback) == ESP_OK) {
+        ESP_LOGI(TAG, "CH32V003を初期化した(出力=0x%02X 読み戻し=0x%02X)",
+                s_output_shadow, readback);
+    } else {
+        ESP_LOGI(TAG, "CH32V003を初期化した(出力=0x%02X 読み戻しは不可)", s_output_shadow);
+    }
     return ESP_OK;
 }
 
 esp_err_t ioExtSetOutput(uint8_t pin, bool level) {
-    if (s_dev_out == nullptr) return ESP_ERR_INVALID_STATE;
+    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
     if (pin > 7) return ESP_ERR_INVALID_ARG;
 
     // USB_SELをHighにするとネイティブUSBがCAN側へ切り替わり、書き込み経路も
@@ -148,21 +150,26 @@ esp_err_t ioExtSetOutput(uint8_t pin, bool level) {
     } else {
         s_output_shadow &= (uint8_t)~mask;
     }
-
-    // 出力(0x38)の前に毎回モード(0x24)を書く。Waveshare公式デモの
-    // wavesahre_rgb_lcd_bl_on()/off()も呼び出しのたびに0x24→0x38の順で書いており、
-    // モードを書かずに0x38だけ書くと実機でNACKされることを確認している(2026-09-12)。
-    esp_err_t err = writeByte(s_dev_mode, CH422G_MODE_IO_OUTPUT);
-    if (err != ESP_OK) return err;
-
-    return writeByte(s_dev_out, s_output_shadow);
+    return writeReg(REG_IO_OUT, s_output_shadow);
 }
 
 esp_err_t ioExtSetBacklight(uint8_t percent) {
-    if (s_dev_out == nullptr) return ESP_ERR_INVALID_STATE;
+    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
 
-    // CH422Gに調光の機能は無い。bit2のON/OFFだけで、percentは0か非0かしか見ない。
-    return ioExtSetOutput(EXIO_LCD_BL, percent != 0);
+    // 消灯はDISP(IO2)をLowにして行う。PWM(0x05)は輝度を変えるだけで、
+    // 255を書いても完全には消えないことを実機で確認済み。
+    if (percent == 0) {
+        return ioExtSetOutput(EXIO_LCD_BL, false);
+    }
+
+    esp_err_t err = ioExtSetOutput(EXIO_LCD_BL, true);
+    if (err != ESP_OK) return err;
+
+    // PWMは反転しており、書く値が大きいほど暗い(0が最大輝度)。
+    uint8_t clamped = (percent > 100) ? 100 : percent;
+    uint8_t pwm     = (uint8_t)(255u - (uint32_t)clamped * 255u / 100u);
+
+    return writeReg(REG_PWM, pwm);
 }
 
 i2c_master_bus_handle_t ioExtGetBus() {

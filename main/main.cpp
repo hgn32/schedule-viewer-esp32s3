@@ -20,6 +20,7 @@
 #include "serial_link.h"
 #include "sntp_time.h"
 #include "time_util.h"
+#include "touch.h"
 #include "wifi_link.h"
 
 static const char* TAG = "main";
@@ -125,9 +126,12 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "[IO] IOエキスパンダの初期化に失敗した(続行する)");
     }
 
-    // 一時的な調査用。タッチICのI2Cアドレスを確定させたら、この呼び出しと
-    // ioExtScanBus()そのものを撤去する。
-    ioExtScanBus();
+    // タッチ(GT911)。無くても表示自体は続けられるので、失敗してもログだけ出して
+    // 続行する(画面のON/OFF操作ができなくなるだけ)。IOエキスパンダと同じI2Cバスを
+    // 共有するため、ioExtBegin()より後に呼ぶ必要がある。
+    if (!touchBegin()) {
+        ESP_LOGW(TAG, "[TOUCH] タッチの初期化に失敗した(続行する)");
+    }
 
     // LCDパネルは表示の前提そのものなので、失敗したら止める。
     // オンチップデバッグが無い基板なので、ここで停止してログだけを頼りに切り分ける。
@@ -255,6 +259,13 @@ extern "C" void app_main(void) {
     // 取得やシリアル受信でタイムラインの再描画が必要になったことを示すフラグ。
     // 00秒に重い全画面再描画が集中しないよう、実際の再描画はTIMELINE_REDRAW_SECまで遅らせる。
     bool     timeline_dirty = false;
+    // 画面ON/OFFの現在状態。バックライトの実際の状態と一致させる。
+    bool     screen_on      = true;
+    // Off中にPress(タップ)で画面を点けた場合、その同じタッチを離す前に
+    // 1500ms経過してLongTapと判定され、そのまま即座に消灯してしまう
+    // 誤動作を防ぐためのフラグ。新しいタッチが始まるたび(Press発生時)に
+    // falseへ戻すので、次のタッチでは通常どおりLongTapが効く。
+    bool     suppress_longtap = false;
 #if USE_DUMMY_SCHEDULE
     // 最初のタイムライン描画時刻(ms、esp_timer基準)とスクリーンショット出力済みか。
     uint32_t rendered_at_ms    = 0;
@@ -266,6 +277,33 @@ extern "C" void app_main(void) {
 
     std::string line;
     for (;;) {
+        // タッチによる画面ON/OFF。取得・描画より前に処理してよい(軽い処理のため)。
+        TouchEvent touch_ev = touchPoll();
+        if (touch_ev == TouchEvent::Press) {
+            // 新しいタッチの開始。前のタッチの抑制状態を引きずらない。
+            suppress_longtap = false;
+            if (!screen_on) {
+                if (ioExtSetBacklight(BACKLIGHT_PERCENT) == ESP_OK) {
+                    screen_on = true;
+                    ESP_LOGI(TAG, "[TOUCH] タップで画面を点灯した");
+                } else {
+                    ESP_LOGW(TAG, "[TOUCH] 画面の点灯に失敗した");
+                }
+                // このタッチ自身の長押しが、点灯直後にそのままロングタップと
+                // 判定されて即座に消灯してしまわないよう抑制する。
+                suppress_longtap = true;
+            }
+        } else if (touch_ev == TouchEvent::LongTap) {
+            if (screen_on && !suppress_longtap) {
+                if (ioExtSetBacklight(0) == ESP_OK) {
+                    screen_on = false;
+                    ESP_LOGI(TAG, "[TOUCH] ロングタップで画面を消灯した");
+                } else {
+                    ESP_LOGW(TAG, "[TOUCH] 画面の消灯に失敗した");
+                }
+            }
+        }
+
         if (nowUtc() >= next_fetch_utc) {
             if (fetchSchedule(&store)) {
                 // 取得の中でサーバ時刻に合わせ直すので、境界の計算はその後に行う。
