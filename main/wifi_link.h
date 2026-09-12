@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include "esp_err.h"
 
@@ -18,15 +19,18 @@ struct WifiStaticIp {
     const char* dns2;
 };
 
-// NVS / esp_netif / esp_event / esp_wifiを初期化してAPへ接続する。
-// timeout_ms待って接続できなければESP_ERR_TIMEOUTを返す(内部でリトライする)。
-// ssid / passwordがnullptrならESP_ERR_INVALID_ARG。
-//
-// static_ipがnullptrならDHCPでアドレスを取得する。非nullptrならDHCPクライアントを
-// 止めて固定IPを設定する。固定IPの場合もesp_netifがIP_EVENT_STA_GOT_IPを上げるため、
-// 待ち合わせの流れはDHCPのときと変わらない。
-esp_err_t wifiLinkBegin(const char* ssid, const char* password, uint32_t timeout_ms,
-                        const WifiStaticIp* static_ip = nullptr);
+// 接続候補1つ分。static_ipがnullptrならDHCPでアドレスを取得する。
+struct WifiCandidate {
+    const char* ssid;
+    const char* password;
+    const WifiStaticIp* static_ip;
+};
+
+// 候補を順に試してAPへ接続する。先にスキャンして実際に見えている候補を優先し、
+// スキャンに出なかった候補(ステルスSSID)も後から試す。
+// 候補1つあたりtimeout_ms_each待つ。全候補が失敗したらESP_ERR_TIMEOUTを返す。
+// candidatesがnullptrかcountが0ならESP_ERR_INVALID_ARG。
+esp_err_t wifiLinkBegin(const WifiCandidate* candidates, size_t count, uint32_t timeout_ms_each);
 
 // 現在APに接続済みでIPv4アドレスを持っているか。
 bool wifiLinkIsConnected();
@@ -37,3 +41,6 @@ bool wifiLinkWaitConnected(uint32_t timeout_ms);
 // 取得済みのIPv4アドレスを"10.0.0.2"形式で返す。未取得なら"0.0.0.0"。
 // bufがnullptrまたはlenが16未満なら何もしない。
 void wifiLinkGetIp(char* buf, size_t len);
+
+// 接続中のSSIDを返す。未接続なら空文字。bufがnullptrかlenが0なら何もしない。
+void wifiLinkGetSsid(char* buf, size_t len);

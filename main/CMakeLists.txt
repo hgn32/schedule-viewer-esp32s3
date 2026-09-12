@@ -11,9 +11,11 @@ idf_component_register(
     # esp_lcdはRGB LCDパネルの駆動、esp_partitionはfontパーティションのmmap、
     # esp_mmはesp_partition_mmapが内部で使うメモリマッピング、
     # esp_driver_i2cはIOエキスパンダ(バックライト/リセット)制御用。
+    # esp_lcd_touch_gt911はタッチIC(GT911)の読み出し用(main/touch.cpp)。
     # freetypeとlovyangfxはコンポーネントマネージャが依存として自動で要求に加える。
     REQUIRES driver esp_timer
              esp_wifi esp_event esp_netif nvs_flash
              esp_http_client esp-tls mbedtls json
              esp_lcd esp_partition esp_mm esp_driver_i2c
+             esp_lcd_touch_gt911
 )

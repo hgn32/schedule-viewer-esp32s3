@@ -2,8 +2,8 @@
 # ESP32-S3-Touch-LCD-7Bへの書き込み(エージェントが実行する入口)。
 #
 # ビルド → 転送物のステージング → USB/IPのデタッチ → Windows側での書き込み →
-# シリアルログの取得、までを通しで行う。実際の書き込みはWindows側の
-# .devcontainer/win-agent.ps1が行い、ログは1行ずつlogs/へ流れてくる。
+# リセット → シリアルログの取得、までを通しで行う。実際の書き込みとリセットは
+# Windows側の.devcontainer/win-agent.ps1が行い、ログは1行ずつlogs/へ流れてくる。
 #
 # 前提: Windows側でwin-agent.ps1が起動していること。
 #       起動していない場合はtools/win.shが10秒でタイムアウトして失敗する。
@@ -16,8 +16,10 @@ set -uo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-PORT="COM11"        # M5Paper時代の実測値。ESP32-S3-Touch-LCD-7Bでは未確定。
-                     # bash tools/win.sh ports で確認して --port で渡すか、ここを書き換える。
+PORT="COM4"          # ESP32-S3-Touch-LCD-7BのネイティブUSBポート(USB-Serial/JTAG、
+                     # VID:PID=303A:1001)で実測。CH343側(USB TO UART)は別ポート(COM5)で、
+                     # そちらからはROMブートローダに到達できないことを確認済み。
+                     # bash tools/win.sh portsで確認して--portで渡すか、ここを書き換える。
 BAUD="921600"
 MONITOR="180"
 DO_BUILD=1
@@ -36,7 +38,7 @@ mkdir -p "${PROJ}/logs"
 
 # --- 1. ビルド ---------------------------------------------------------------
 if [ "$DO_BUILD" = "1" ]; then
-    echo "[1/5] ビルド"
+    echo "[1/6] ビルド"
     # shellcheck disable=SC1091
     . /opt/esp/idf/export.sh > /dev/null 2>&1
     if ! (cd "$PROJ" && idf.py build > "${PROJ}/logs/build.log" 2>&1); then
@@ -47,7 +49,7 @@ if [ "$DO_BUILD" = "1" ]; then
 fi
 
 # --- 2. 転送物のステージング --------------------------------------------------
-echo "[2/5] 転送物のステージング"
+echo "[2/6] 転送物のステージング"
 if ! bash "${PROJ}/tools/stage-winflash.sh" > /dev/null; then
     echo "エラー: stage-winflash.shに失敗した。" >&2
     exit 1
@@ -56,18 +58,19 @@ fi
 # --- 3. USB/IPのデタッチ ------------------------------------------------------
 # アタッチされたままだとWindowsがCOMポートを開けない。外れていても失敗させない。
 if [ -e /dev/ttyUSB0 ]; then
-    echo "[3/5] USB/IPのデタッチ"
+    echo "[3/6] USB/IPのデタッチ"
     "${PROJ}/.devcontainer/usb-attach.sh" detach || true
 fi
 
-# --- 4. Windows側へ転送して書き込む -------------------------------------------
-echo "[4/5] 転送物の取得(Windows側)"
+# --- 4. Windows側へ転送 -------------------------------------------------------
+echo "[4/6] 転送物の取得(Windows側)"
 if ! WIN_TIMEOUT=180 bash "${PROJ}/tools/win.sh" sync; then
     echo "エラー: 転送物の取得に失敗した。" >&2
     exit 1
 fi
 
-echo "[5/5] 書き込み(port=${PORT} baud=${BAUD})"
+# --- 5. 書き込み ---------------------------------------------------------------
+echo "[5/6] 書き込み(port=${PORT} baud=${BAUD})"
 if ! WIN_TIMEOUT=600 bash "${PROJ}/tools/win.sh" flash "port=${PORT}" "baud=${BAUD}"; then
     echo "エラー: 書き込みに失敗した。logs/flash.logを参照すること。" >&2
     tail -20 "${PROJ}/logs/flash.log" 2> /dev/null
@@ -75,7 +78,15 @@ if ! WIN_TIMEOUT=600 bash "${PROJ}/tools/win.sh" flash "port=${PORT}" "baud=${BA
 fi
 tail -5 "${PROJ}/logs/flash.log" 2> /dev/null
 
-# --- 5. シリアルログ ----------------------------------------------------------
+# --- 6. リセット ---------------------------------------------------------------
+# --afterのhard_resetだけではアプリが起動しないことがあるため、書き込み後に
+# 明示的なリセット(esptool run)を発行する。失敗してもログ取得は続ける。
+echo "[6/6] リセット(port=${PORT})"
+if ! WIN_TIMEOUT=30 bash "${PROJ}/tools/win.sh" reset "port=${PORT}" > /dev/null; then
+    echo "警告: リセットの発行に失敗した(手動でのリセットが必要な場合がある)。"
+fi
+
+# --- シリアルログ ---------------------------------------------------------------
 if [ "$MONITOR" != "0" ]; then
     echo "ログを${MONITOR}秒取得する"
     WIN_TIMEOUT=$((MONITOR + 60)) bash "${PROJ}/tools/win.sh" monitor "port=${PORT}" "sec=${MONITOR}" > /dev/null

@@ -9,17 +9,18 @@
 #                                        |
 #                                        | (sshの標準出力を逆流)
 #                                        v
-#   Windows : このスクリプトが「決められた5つの操作」だけを実行する
+#   Windows : このスクリプトが「決められた6つの操作」だけを実行する
 #                                        |
 #                                        v
 #   コンテナ: logs/win/(ID).log (末尾に "=== EXIT rc=N ===")
 #
-# 受け付けるのは下記の5つだけで、任意のコマンドは実行しない。
+# 受け付けるのは下記の6つだけで、任意のコマンドは実行しない。
 # コンテナ側から渡せるのはポート番号などのパラメータのみで、書式も検証する。
 #
 #   sync                          転送物(esptool一式と.bin)をscpで取得する
 #   ports                         COMポートの一覧を出す
 #   probe   port=COM3             chip_id(書き換えは起きない)
+#   reset   port=COM3             アプリを起動させる(esptool run。書き換えは起きない)
 #   flash   port=COM3 baud=N      書き込み
 #   monitor port=COM3 sec=N       シリアルログの取得
 #
@@ -152,7 +153,7 @@ function Get-Number([hashtable]$opt, [string]$key, [int]$fallback) {
     return $fallback
 }
 
-# --- 5つの操作 ---------------------------------------------------------------
+# --- 6つの操作 ---------------------------------------------------------------
 # いずれも 2>&1 でstderrも拾う。捨てると失敗理由がコンテナ側に届かない。
 
 # scpは新しい版ほど内部でSFTPを使うため、sshd側にSubsystem sftpが無いと
@@ -194,6 +195,10 @@ function Invoke-Ports {
 
 function Invoke-Probe([string]$port) {
     & $script:Py -m esptool --chip esp32s3 --port $port chip_id 2>&1 | ForEach-Object { "$_" }
+}
+
+function Invoke-Reset([string]$port) {
+    & $script:Py -m esptool --chip esp32s3 --port $port run 2>&1 | ForEach-Object { "$_" }
 }
 
 function Invoke-Flash([string]$port, [int]$baud) {
@@ -263,6 +268,10 @@ while ($true) {
                     "probe" {
                         if (-not $port) { $out = "エラー: portの書式が不正`n"; $rc = 2 }
                         else { $out = (Invoke-Probe $port | Out-String); $rc = $LASTEXITCODE }
+                    }
+                    "reset" {
+                        if (-not $port) { $out = "エラー: portの書式が不正`n"; $rc = 2 }
+                        else { $out = (Invoke-Reset $port | Out-String); $rc = $LASTEXITCODE }
                     }
                     "flash" {
                         if (-not $port) { $out = "エラー: portの書式が不正`n"; $rc = 2 }

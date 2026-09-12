@@ -38,11 +38,11 @@ inline uint32_t floorHourUtc() {
     return jst_floored - JST_OFFSET;
 }
 
-// "2026/06/09(月)"
+// "9月12日(金)"(月日はゼロ埋めしない)
 inline std::string formatDate(const struct tm& t) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%04d/%02d/%02d(%s)",
-             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+    snprintf(buf, sizeof(buf), "%d月%d日(%s)",
+             t.tm_mon + 1, t.tm_mday,
              WEEKDAYS_JA[t.tm_wday]);
     return std::string(buf);
 }

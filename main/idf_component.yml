@@ -13,3 +13,7 @@ dependencies:
   ## 日本語TTF(フラッシュのfontパーティション)を描画するためのFreeType。
   ## LovyanGFX単体はTTFを読めない。
   espressif/freetype: "^2.14"
+  ## タッチIC(GT911)のドライバ。io_extと同じI2Cバス(GPIO8/9)を共有して使う
+  ## (LovyanGFXのタッチ層はレガシーI2Cドライバ(driver/i2c.h)を使うため、
+  ## io_ext(新I2Cドライバ)と衝突する。詳細はCLAUDE.mdの実装上の決定事項)。
+  espressif/esp_lcd_touch_gt911: "^1.1"

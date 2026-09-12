@@ -11,8 +11,11 @@
 // 1つに削っても動作は変わらない。
 //
 // 表示対象から外す予定:
-//   isCancelled: true  中止された会議
-//   isAllDay:    true  00:00〜翌00:00の24時間枠になり6時間タイムラインを潰すため
+//   isCancelled: true         中止された会議
+//   isAllDay:    true         00:00〜翌00:00の24時間枠になり12時間タイムラインを潰すため
+//   showAs:      free         空き(OutlookのBusyStatus 0)
+// showAs: tentative(BusyStatus 1、仮の予定)は表示するが、明滅させず枠線を破線にする
+// (Event::is_tentative、main/display.cpp)。
 //
 // 受け付ける全体構造:
 //   [ {...}, {...} ]                     ルートが配列

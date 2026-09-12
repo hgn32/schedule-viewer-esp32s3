@@ -6,6 +6,7 @@
 #   tools/win.sh sync                          転送物(esptool一式と.bin)をWindowsへ取得
 #   tools/win.sh ports                         COMポートの一覧
 #   tools/win.sh probe   port=COM3             chip_id(書き換えは起きない)
+#   tools/win.sh reset   port=COM4             アプリを起動させる(リセットのみ)
 #   tools/win.sh flash   port=COM3 baud=921600 書き込み
 #   tools/win.sh monitor port=COM3 sec=180     シリアルログの取得
 #   tools/win.sh restart                       win-agent.ps1を自己更新して再起動させる
@@ -23,7 +24,9 @@ LOG_DIR="${PROJ}/logs/win"
 TIMEOUT="${WIN_TIMEOUT:-300}"
 
 if [ $# -lt 1 ]; then
-    sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # 先頭のコメント塊(2行目以降)だけを使い方として出す。行数で切ると
+    # コメントを増やしたときにコード行まで出てしまうため、最初の非コメント行で止める。
+    awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
     exit 2
 fi
 
@@ -32,8 +35,8 @@ shift
 ARGS="$*"
 
 case "$ACTION" in
-    sync|ports|probe|flash|monitor|restart) ;;
-    *) echo "エラー: 未知の操作 '${ACTION}'。sync/ports/probe/flash/monitor/restartのいずれか。" >&2
+    sync|ports|probe|reset|flash|monitor|restart) ;;
+    *) echo "エラー: 未知の操作 '${ACTION}'。sync/ports/probe/reset/flash/monitor/restartのいずれか。" >&2
        exit 2 ;;
 esac
 

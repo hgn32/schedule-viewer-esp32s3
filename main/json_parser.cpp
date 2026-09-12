@@ -24,12 +24,13 @@ const char* const kEndKeys[]    = {"end", "endTime", "end_time",
 const char* const kLocKeys[]    = {"location", "place", "room", "locationName"};
 const char* const kNowKeys[]    = {"now", "serverTime", "currentTime", "timestamp"};
 // 表示対象から外す予定の判定に使う。
-// 中止済みの予定と終日予定は6時間タイムラインに載せない
+// 中止済みの予定と終日予定は12時間タイムラインに載せない
 // (終日予定は00:00〜翌00:00の24時間枠になり、画面を丸ごと潰してしまう)。
 const char* const kCancelKeys[] = {"isCancelled", "isCanceled", "cancelled", "canceled"};
 const char* const kAllDayKeys[] = {"isAllDay", "allDay", "all_day", "isAllday"};
-// 空き時間と仮の予定も外す。旧PC版(scheduler_sender.py)がOutlookの
-// BusyStatus 0(空き) / 1(仮の予定)を送らなかったのと同じ扱い。
+// 空き時間(showAs=free、BusyStatus 0)だけを表示対象から外す。
+// 仮の予定(tentative、BusyStatus 1)は表示するが、明滅させず枠線を破線にして
+// 確定の予定と区別する(display.cpp、Event::is_tentative)。
 // Graphの"showAs"は free / tentative / busy / oof / workingElsewhere を返す。
 const char* const kBusyKeys[]   = {"showAs", "busyStatus", "busy", "status",
                                    "freeBusyStatus"};
@@ -54,9 +55,10 @@ int offsetFromTimeZone(const char* tz) {
     return 0;
 }
 
-// 空き扱い(free)か仮の予定(tentative)ならtrue。キーが無ければfalse
-// (サーバがこの項目を返さない場合は従来どおり全件を対象にする)。
-bool isFreeOrTentative(const cJSON* obj, const char* const* keys, size_t n);
+// showAs / busyStatus等の値から予定の状態を判定する。
+// キーが無い、または判別できない値のときはBusyState::Other(表示対象)。
+enum class BusyState { Free, Tentative, Other };
+BusyState busyState(const cJSON* obj, const char* const* keys, size_t n);
 
 // 候補キーのいずれかがtrue相当ならtrue。キーが無ければfalse。
 // JSONの真偽値のほか、"true"文字列と非0の数値も真として扱う。
@@ -71,29 +73,37 @@ bool isFlagSet(const cJSON* obj, const char* const* keys, size_t n) {
     return false;
 }
 
-bool isFreeOrTentative(const cJSON* obj, const char* const* keys, size_t n) {
+BusyState busyState(const cJSON* obj, const char* const* keys, size_t n) {
     const cJSON* v = findByKeys(obj, keys, n);
-    if (v == nullptr) return false;
+    if (v == nullptr) return BusyState::Other;
 
     if (cJSON_IsNumber(v)) {
-        // OutlookのBusyStatus: 0=空き, 1=仮の予定
+        // OutlookのBusyStatus: 0=空き, 1=仮の予定, それ以外は表示対象。
         const int status = (int)v->valuedouble;
-        if (status != 0 && status != 1) return false;
-        // 実スキーマが未確定なので、外した根拠をログに残す。
-        // 予定が消える方向の判定なので、黙って落とさない。
-        ESP_LOGI(TAG, "空き/仮の予定として除外: %s=%d", v->string ? v->string : "?", status);
-        return true;
+        const char* key = v->string ? v->string : "?";
+        if (status == 0) {
+            ESP_LOGI(TAG, "空きとして除外: %s=%d", key, status);
+            return BusyState::Free;
+        }
+        if (status == 1) {
+            ESP_LOGI(TAG, "仮の予定として取り込み(明滅なし): %s=%d", key, status);
+            return BusyState::Tentative;
+        }
+        return BusyState::Other;
     }
     if (cJSON_IsString(v) && v->valuestring != nullptr) {
-        if (strcasecmp(v->valuestring, "free") != 0 &&
-            strcasecmp(v->valuestring, "tentative") != 0) {
-            return false;
+        const char* key = v->string ? v->string : "?";
+        if (strcasecmp(v->valuestring, "free") == 0) {
+            ESP_LOGI(TAG, "空きとして除外: %s=%s", key, v->valuestring);
+            return BusyState::Free;
         }
-        ESP_LOGI(TAG, "空き/仮の予定として除外: %s=%s", v->string ? v->string : "?",
-                 v->valuestring);
-        return true;
+        if (strcasecmp(v->valuestring, "tentative") == 0) {
+            ESP_LOGI(TAG, "仮の予定として取り込み(明滅なし): %s=%s", key, v->valuestring);
+            return BusyState::Tentative;
+        }
+        return BusyState::Other;
     }
-    return false;
+    return BusyState::Other;
 }
 
 // 時刻を表すノードをUTC epochへ。文字列 / 数値 / {dateTime,timeZone}に対応する。
@@ -215,12 +225,15 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
             filtered++;
             continue;
         }
-        if (isFreeOrTentative(item, kBusyKeys, sizeof(kBusyKeys) / sizeof(kBusyKeys[0]))) {
+        const BusyState busy =
+            busyState(item, kBusyKeys, sizeof(kBusyKeys) / sizeof(kBusyKeys[0]));
+        if (busy == BusyState::Free) {
             filtered++;
             continue;
         }
 
         Event e = {};
+        e.is_tentative = (busy == BusyState::Tentative);
         const cJSON* s = findByKeys(item, kStartKeys, sizeof(kStartKeys) / sizeof(kStartKeys[0]));
         const cJSON* n = findByKeys(item, kEndKeys, sizeof(kEndKeys) / sizeof(kEndKeys[0]));
 

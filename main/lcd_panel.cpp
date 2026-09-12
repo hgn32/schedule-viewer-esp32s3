@@ -24,8 +24,12 @@ namespace {
 class PanelLcd7b : public lgfx::Panel_FrameBufferBase {
 public:
     PanelLcd7b() {
-        _write_depth = lgfx::color_depth_t::rgb565_2Byte;
-        _read_depth  = lgfx::color_depth_t::rgb565_2Byte;
+        // esp_lcdのRGBパネルはフレームバッファを16bitのネイティブ順で読む。
+        // LovyanGFXのrgb565_2Byteはバイトスワップ済みの形式(SPIパネル向け)なので、
+        // それを渡すと上位・下位バイトが入れ替わり、赤と青が混ざって紫がかる。
+        // スワップしない側のrgb565_nonswappedを使う(enum.hppの定義を参照)。
+        _write_depth = lgfx::color_depth_t::rgb565_nonswapped;
+        _read_depth  = lgfx::color_depth_t::rgb565_nonswapped;
     }
 
     // esp_lcdから取得したフレームバッファの先頭アドレスを渡す。
@@ -110,6 +114,11 @@ esp_err_t createEspLcdPanel(esp_lcd_panel_handle_t* out_panel, void** out_fb) {
     cfg.data_width       = 16;
     cfg.bits_per_pixel   = 16;
     cfg.num_fbs          = 1;
+    // バウンスバッファ(SRAM)は必須。外すとEDMAがPSRAMを直接読む構成になるが、
+    // 実機で試したところ画面が真っ黒になった(2026-09-12)。公式ドキュメントの
+    // "a high pixel clock might cause LCD peripheral starvation, leading to
+    // display corruption"に該当する。CPUコピーの負荷(pclk 30MHzで毎秒60MB相当)は
+    // 承知のうえで、ここは1024x10pxのまま維持すること。
     cfg.bounce_buffer_size_px = 1024 * 10;
 
     cfg.timings.pclk_hz           = 30 * 1000 * 1000;
@@ -174,10 +183,11 @@ esp_err_t lcdPanelBegin() {
         ESP_LOGE(TAG, "LGFX_Deviceの初期化に失敗");
         return ESP_FAIL;
     }
-    gfx.setRotation(LCD_ROTATION);
+    // 回転はここではかけない。LGFX_Deviceは生の向き(1024x600)のまま使い、
+    // 回転はDisplay側の描画用スプライトに持たせる(lcd_panel.hのコメント参照)。
 
     s_gfx = &gfx;
-    ESP_LOGI(TAG, "LCDパネルを初期化した(論理%dx%d)", gfx.width(), gfx.height());
+    ESP_LOGI(TAG, "LCDパネルを初期化した(生%dx%d)", gfx.width(), gfx.height());
     return ESP_OK;
 }
 

@@ -1,5 +1,5 @@
 # ESP32-S3-WROOM-1-N16R8はフラッシュ16MB。OTAは使わないのでfactory 1本に寄せる。
-# fontパーティションはSDカードの代わりに日本語TTF(MPLUS1-ExtraBold.ttf、約1.8MB)を
+# fontパーティションはSDカードの代わりに日本語TTF(MPLUS1-Medium.ttf、約1.8MB)を
 # 生のまま置く場所。esp_partition_mmapでそのままFreeTypeに渡すため、
 # サブタイプ0x40(独自定義)のdataパーティションにしている。
 # Name,     Type, SubType,  Offset,   Size,     Flags

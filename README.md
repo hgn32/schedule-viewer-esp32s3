@@ -1,7 +1,7 @@
 # schedule-viewer-esp32s3
 
 Waveshare ESP32-S3-Touch-LCD-7B(7インチ1024×600 IPS、RGB565パラレル16bit)の
-LCDに、Outlook予定表を6時間分のタイムライン表示するビューアです。
+LCDに、Outlook予定表を12時間分のタイムライン表示するビューアです。
 基板がWi-Fiで予定配信サーバのREST APIを叩き、返ってきたJSONをLCDに描画します。
 基板は90度回して縦置き(論理600×1024)で使います。
 
@@ -38,7 +38,7 @@ LCDに、Outlook予定表を6時間分のタイムライン表示するビュー
 │   ├── time_util.h          # UTC/JST変換、ISO8601/HTTP Dateのパース
 │   ├── CMakeLists.txt
 │   └── idf_component.yml    # LovyanGFX(git依存)、espressif/freetype への依存
-├── fonts/                   # fontパーティションへ書き込むTTF(MPLUS1-ExtraBold.ttf)とOFL.txt
+├── fonts/                   # fontパーティションへ書き込むTTF(MPLUS1-Medium.ttf)とOFL.txt
 ├── docs/
 │   └── spec.md              # 仕様(画面、表示条件、プロトコル、時刻)
 ├── pc_python/
@@ -111,7 +111,7 @@ idf.py build
 3. 書き込みとログ取得を行う → 後述の「[書き込みとログ取得(Windows側で実行)](#書き込みとログ取得windows側で実行)」を参照
 
 **日本語フォントは`font`パーティション(0x610000、2MB)へ生のTTFとして書き込みます。**
-ビルド時に`fonts/MPLUS1-ExtraBold.ttf`が`build/font.bin`へコピーされ、`build/flash_args`にも
+ビルド時に`fonts/MPLUS1-Medium.ttf`が`build/font.bin`へコピーされ、`build/flash_args`にも
 自動で含まれるため、`idf.py flash`(またはWindows側の書き込み)を実行すれば他のイメージと
 一緒に書き込まれます。**初回は必ずフォントを含めて書き込んでください**
 (フォントが無い状態では起動が止まります)。
@@ -197,7 +197,10 @@ batが`-ExecutionPolicy Bypass`を付けるのは、既定では`.ps1`の実行�
 > ただし**この行を常設すると`ssh`/`scp`のたびに`remote port forwarding failed`が出ます**。
 
 3. 以後、書き込みは**devcontainer内から**実行します。ビルド・ステージング・
-   USB/IPのデタッチ・書き込み・ログ取得まで通しで行います。
+   USB/IPのデタッチ・書き込み・リセット・ログ取得まで通しで行います。
+   `--after hard_reset`だけではアプリが起動しないことがあるため、書き込み成功後に
+   `esptool run`で明示的なリセットを発行してからログ取得に入ります(失敗しても
+   致命的にはせず、警告を出して続行します)。
 
 ```bash
 bash tools/flash.sh                 # ビルドから書き込み、その後180秒ぶんログを取る
@@ -212,11 +215,12 @@ bash tools/flash.sh --port COM12 --baud 460800 --monitor 0
 | `bash tools/win.sh sync` | `scp`で転送物を取得 |
 | `bash tools/win.sh ports` | COMポートの一覧(`serial.tools.list_ports`) |
 | `bash tools/win.sh probe port=COM11` | `esptool chip_id`(書き換えは起きない) |
+| `bash tools/win.sh reset port=COM11` | `esptool run`でアプリを起動させる(書き換えは起きない) |
 | `bash tools/win.sh flash port=COM11 baud=921600` | 書き込み |
 | `bash tools/win.sh monitor port=COM11 sec=180` | シリアルログの取得 |
 | `bash tools/win.sh restart` | `win-agent.ps1`を自己更新して再起動 |
 
-**`win-agent.ps1`が実行するのはこの5つだけです。** コンテナから渡せるのはポート番号などの
+**`win-agent.ps1`が実行するのはこの6つだけです。** コンテナから渡せるのはポート番号などの
 パラメータのみで、書式(`COM<数字>`、数値)も検証します。任意のコマンドは実行しません。
 
 処理の流れは次のとおりです。

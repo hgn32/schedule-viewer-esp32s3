@@ -8,6 +8,8 @@ struct Event {
     uint32_t end_utc;
     std::string title;
     std::string location;
+    // showAs=tentative(BusyStatus 1)の仮の予定。表示はするが明滅させず、枠を破線にする。
+    bool is_tentative = false;
 };
 
 class ScheduleStore {

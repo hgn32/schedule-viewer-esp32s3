@@ -12,7 +12,11 @@ using LGFX_Device = lgfx::LGFX_Device;
 
 // Waveshare ESP32-S3-Touch-LCD-7Bの物理パネル(1024x600 RGB565パラレル)を
 // esp_lcdで駆動し、LovyanGFXのLGFX_Deviceとして包む層。
-// 論理座標はsetRotation(LCD_ROTATION)で600x1024(縦長)にする。
+// このLGFX_Deviceは回転なし(生の1024x600)のまま使う。回転はDisplay側の
+// 描画用スプライトが持つ(setRotation(LCD_ROTATION)をスプライトに掛ける)。
+// 向きを揃えることでpushSprite()が同じ向きどうしの転送になり、行単位の
+// 連続コピーになる(向きが食い違うと回転を伴う転送になり、実測で
+// 全画面転送が832ms掛かった)。
 
 static const int LCD_PHYS_W = 1024;
 static const int LCD_PHYS_H = 600;

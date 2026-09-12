@@ -8,7 +8,7 @@
 
 // フラッシュのfontパーティション(生のTTF)をFreeTypeで描くための層。
 //
-// SDカードが無い基板なので、日本語TTF(fonts/MPLUS1-ExtraBold.ttf)はビルド時に
+// SDカードが無い基板なので、日本語TTF(fonts/MPLUS1-Medium.ttf)はビルド時に
 // fontパーティションへ書き込み、esp_partition_mmapで直接メモリへマップして
 // FT_New_Memory_Faceへ渡す(ファイルシステムを介さない)。
 
@@ -36,14 +36,18 @@ void fontTtfDrawText(LovyanGFX* gfx, const std::string& str, int x, int y, int p
 // 使う文字だけを先に描いてカバレッジをRAM(PSRAM可)に保持しておく。
 
 // charsに含まれる各文字をpxピクセル高で1回だけ描き、カバレッジをキャッシュする。
-// 呼び直すと同じpxで再キャッシュする(キャッシュは1px太らせ後の幅で保持する)。
+// 呼び直すと同じpxで再キャッシュする。
 esp_err_t fontTtfCacheGlyphs(const char* chars, int px);
 
 // キャッシュ済み文字だけで構成された文字列の幅。キャッシュに無い文字は幅0として無視する。
 int fontTtfCachedTextWidth(const std::string& str);
 
 // キャッシュ済みグリフを貼り付けるだけの描画(FreeTypeを呼ばない)。
-// 合成ロジックはfontTtfDrawText()と同じ(1px太らせ+下地色との線形合成)。
+// 合成ロジックはfontTtfDrawText()と同じ(下地色との線形合成)。
 void fontTtfDrawCachedText(LovyanGFX* gfx, const std::string& str, int x, int y,
                            uint32_t fore_rgb888, uint32_t back_rgb888,
                            lgfx::textdatum_t datum);
+
+// 一時的な内訳計測(FreeTypeのラスタライズ時間と転送時間)。切り分け用で、済んだら撤去する。
+void fontTtfProfileReset();
+void fontTtfProfileGet(uint32_t* ft_us, uint32_t* blit_us);

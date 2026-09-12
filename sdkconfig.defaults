@@ -26,10 +26,12 @@ CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
 
 # --- コンソール / プロトコル用UART ----------------------------------------
-# PC(scheduler_sender.py)との通信もESP_LOGの出力も同じUART0 115200bpsに乗る
-# (USB-TO-UARTポートに出る)。PC側は完全一致で"REQ:ALL"だけを拾うため、
-# ログが混ざっても実害は無い。
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# ログはネイティブUSB(USB-Serial/JTAG、COM4)へ出す。UART0(USB-TO-UARTポート、
+# PC側のscheduler_sender.pyとの通信専用)は副コンソール扱いで、ホストが
+# 接続してからでないと初期化されない仕様のため、UART0を主コンソールにすると
+# 書き込み後に監視を開いても無音になり、実機のログが一切取得できなかった
+# (2026-09-12に確認)。ボーレート設定は起動メッセージ等で使われるため残す。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
 # --- TLS (予定取得APIのHTTPS) ---------------------------------------------

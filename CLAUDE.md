@@ -1,14 +1,21 @@
 # schedule-viewer-esp32s3プロジェクトルール
 
-Waveshare ESP32-S3-Touch-LCD-7B(ESP32-S3-WROOM-1-N16R8、7インチ1024x600 IPS、
-RGB565パラレル16bit。基板を90度回して縦置き・論理600x1024で使う)に、
-Outlook予定表を6時間分のタイムラインとして表示するビューア。予定はWi-Fi(STA)経由で
-予定配信サーバのREST APIからHTTPSで取得する。Bluetoothは使わない。
+**このファイルは私(エージェント)が守る行動ルールだけを持つ。**
+プロジェクトの構成・実装上の制約・製品仕様・経緯・実測値はここに書かない。
 
-USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)は、サーバへの
-到達性が実機で確認できるまでフォールバックとして残してある。確認が取れたら撤去してよい。
+Waveshare ESP32-S3-Touch-LCD-7B向けのOutlook予定表ビューア。言語は**C++**、
+フレームワークは**ESP-IDF v5.5**。ビルドはdevcontainer内でのみ行う。
 
-言語は**C++**、フレームワークは**ESP-IDF v5.5**。ビルドはdevcontainer内でのみ行う。
+## 作業前に読むもの(絶対厳守)
+
+| 触るもの | 先に読む |
+|---|---|
+| `main/`の`.cpp` / `.h`、`sdkconfig.defaults`、`partitions.csv`、`tools/` | `docs/implementation-notes.md`(構成と、知らずに触ると壊れる制約) |
+| 画面・LCD・IOエキスパンダ・書き込み経路まわり | `docs/implementation-notes.md`に加えて`docs/waveshare-esp32s3-7b-display.md` |
+| 仕様の変更(プロトコル、画面レイアウト、表示条件、時刻の扱い) | `docs/spec.md` |
+
+**読まずに編集しないこと。** 過去に、制約を読まずに値を書き換えて実機の表示を
+壊した事例がある。
 
 ## 禁止事項（絶対厳守 / 最優先）
 
@@ -20,118 +27,12 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 
 - **ASCIIと日本語の間に半角スペースを入れない。** ドキュメント、コード内のコメント、
   ログ文字列、ユーザーへの回答すべてに適用する。
-  - 悪い例: `M5Paper の EPD は 6 時間分を表示する`
-  - 良い例: `M5PaperのEPDは6時間分を表示する`
+  - 悪い例: `M5Paper の EPD は 12 時間分を表示する`
+  - 良い例: `M5PaperのEPDは12時間分を表示する`
 - 次のスペースは構文・整列の要素なので対象外(触らない)。
   - Markdownの表の区切り`|`の前後、コードブロック内のコマンド
   - 強調記号`**`の前後
   - 行頭の箇条書き記号・番号の直後(`1. 項目` / `## 3. 見出し`)。詰めるとリストとして認識されない
-
-## ディレクトリ構成
-
-| パス | 役割 |
-|---|---|
-| `main/main.cpp` | `app_main()`。IO拡張→LCD→シリアル→フォント初期化 → ブートメッセージ → バックライト点灯 → Wi-Fi接続 → 定期GET → 再描画 |
-| `main/wifi_link.cpp/.h` | Wi-Fi(STA / WPA2-PSK)接続。タイムアウトと再接続上限つき |
-| `main/http_client.cpp/.h` | `esp_http_client`でHTTPS GET。`esp_crt_bundle`で証明書検証。リダイレクトは追わない |
-| `main/json_parser.cpp/.h` | cJSONでレスポンスを`Event`へ変換。**実スキーマ未確定のため候補表で複数の形を受ける** |
-| `main/secrets.h` | SSID/パスワード/URL/ポーリング間隔。**git追跡外**。雛形は`secrets.h.example` |
-| `main/serial_link.cpp/.h` | UART0(115200bps)の行単位送受信。Arduinoの`Serial`を置き換えた層(フォールバック) |
-| `main/protocol.cpp/.h` | PC↔デバイス間のテキストプロトコル解釈。**トランスポート非依存の純粋な解析**に保つ(フォールバック) |
-| `main/schedule.cpp/.h` | 予定データの保持と期間フィルタ。**外部依存の無い純粋なデータ構造**に寄せる |
-| `main/display.cpp/.h` | LovyanGFXによるLCD描画(タイムラインUI)。スプライトへ描いてフレームバッファへ転送 |
-| `main/lcd_panel.cpp/.h` | `esp_lcd`のRGBパネル初期化と、LovyanGFXの`LGFX_Device`ラッパー |
-| `main/io_ext.cpp/.h` | IO拡張チップ(I2C 0x24)。バックライトのON/OFFとPWM調光 |
-| `main/font_ttf.cpp/.h` | FreeTypeで`font`パーティション上のTTFを描く層 |
-| `fonts/` | `font`パーティションへ書き込むTTF(`MPLUS1-ExtraBold.ttf`)とそのライセンス(`OFL.txt`) |
-| `main/text_util.cpp/.h` | 件名・場所の正規化(全角→半角、半角カナ→全角カナ) |
-| `main/time_util.h` | UTC⇔JST変換とフォーマット、ISO8601/HTTP Dateのパース。libcのTZがUTCである前提 |
-| `main/idf_component.yml` | ESPコンポーネントレジストリ/gitからの依存(LovyanGFX、`espressif/freetype`) |
-| `sdkconfig.defaults` | Kconfigの初期値。**恒久的な設定変更はここに書く**(`sdkconfig`は生成物で追跡しない) |
-| `partitions.csv` | パーティションテーブル(16MBフラッシュ / factory 6MB / `font`パーティション2MB / OTA無し) |
-| `pc_python/scheduler_sender.py` | PC側。Outlook予定取得 → シリアル送信 |
-| `.devcontainer/win-agent.bat` | **Windows側の起動口。** `win-agent.ps1`を起動し直し続けるループ |
-| `.devcontainer/win-agent.ps1` | Windows側で動く実行スクリプト。`sync` / `ports` / `probe` / `flash` / `monitor`の5操作だけを実行し、**任意のコマンドは実行しない**。起動のたびに自己更新する |
-| `tools/flash.sh` | **エージェントが実行する書き込みコマンド。** ビルド → ステージング → デタッチ → `win.sh sync` → `win.sh flash` → `win.sh monitor` |
-| `tools/win.sh` | Windows側へ1操作を依頼し、`logs/win/<ID>.log`の`=== EXIT rc= ===`を待って終了コードを引き継ぐ |
-| `tools/win-agent.sh` | FIFO(`.win-request`)を読み、要求をsshの標準出力へ中継する待ち受け側 |
-| `.devcontainer/flash.ps1` | Windows側で1回だけ手実行する版(自動化を使わない場合のフォールバック) |
-| `tools/win_flash.py` | Windows側で走る書き込み(esptool起動)とシリアル監視。出力を1行ずつsshで`logs/`へ流す |
-| `tools/stage-winflash.sh` | Windowsへ渡す一式(esptool・pyserial・intelhex・成果物)を`build/winflash/`へまとめる |
-| `logs/` | 実機のログ置き場(`build.log` / `flash.log` / `monitor.log` / `win.log`)。**git追跡外** |
-
-`main/CMakeLists.txt`は`main/*.cpp`を`GLOB_RECURSE`しているので、
-ソースを増やすときにファイル名の追記は不要。ただし新しいESP-IDFコンポーネントに
-依存する場合は`REQUIRES`への追加が必要（`MINIMAL_BUILD`のため、
-書かないコンポーネントはビルド対象に入らない）。
-
-## 実装上の決定事項(変更はユーザー指示のみ)
-
-1. **M5Unified/M5GFXは使わない。** M5GFXにはesp32s3向けの`Panel_RGB`が無いため、
-   表示は`esp_lcd`(ESP-IDF公式のRGBパネルドライバ)+LovyanGFX(git依存、1.2.28)で構成する。
-   `esp_lcd`がRGBパネルを駆動してフレームバッファ(PSRAM上1面)を確保し、
-   `lgfx::Panel_FrameBufferBase`派生でそれを包んで`LGFX_Device`にする(`main/lcd_panel.cpp`)。
-   **LovyanGFXの`Bus_RGB`は使わない**(ポーチ値が`int8_t`で、Waveshare公式サンプルの
-   値162/152が入らないため)。RTCチップは搭載していないので時刻復元・書き戻しは行わない。
-2. **ESP-IDFはv5系に固定する。** v6.0でレガシーI2Cドライバ(`driver/i2c.h`)が
-   削除され、LovyanGFXがまだ追従していないため。制約は`main/idf_component.yml`と
-   `.devcontainer/docker-compose.yml`の`DOCKER_TAG`の両方に書いてある。片方だけ上げない。
-3. **日本語フォントはフラッシュの`font`パーティション上のTTFをFreeTypeで描く。**
-   `partitions.csv`の`font`パーティション(0x610000、2MB、data/0x40)へ生のTTFを書き込み、
-   `main/font_ttf.cpp`が`esp_partition_mmap`でマップして`FT_New_Memory_Face`で開く。
-   サイズは起動メッセージ46px、日付・時刻目盛36px、時計40px、予定22px(`display.cpp`)。
-   LovyanGFXはTTFを読めないので`espressif/freetype`を`font_ttf.cpp`から使う。
-   **TTFが読めないときは起動を止める**(`Display::begin()`がfalse)。内蔵フォントへは
-   退避しない。エラー表示にだけ内蔵フォント(`efontJA_24_b`)を使う
-   (`Display::showFatalMessage()`)。SDカードは使わない(`sd_card.cpp`は削除済み)。
-   `sdkconfig.defaults`の`CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768`が無いと動かない
-   (FreeTypeがスタックを大きく使う。`CONFIG_FATFS_LFN_HEAP`はSDカードを使わないため不要)。
-4. **プロトコルとログは同じUART0に乗る。** UART0は基板のUSB-TO-UARTポート
-   (ネイティブUSBのType-Cとは別ポート)に出る。PC側(`scheduler_sender.py`)は完全一致で
-   `REQ:ALL`だけを拾うため実害は無い。ログを別UARTに逃がす改修はしない。
-5. **描画はPSRAM上のスプライトへ行い、完成後にフレームバッファへ転送する。**
-   スプライトは600x1024のRGB565(約1.2MB)。`pushSprite()`で転送する。回転は
-   `LGFX_Device`側(`LCD_ROTATION`)で行う。部分更新(毎秒の時計、明滅する予定枠)は
-   転送先に`setClipRect()`を掛けてから`pushSprite()`する。フレームバッファは1面
-   (PSRAM)+バウンスバッファ(SRAM、1024x10px)方式で、CPUが直接書いてもキャッシュ同期は
-   不要(`esp_lcd`のRGBパネルドライバが面倒を見る)。
-6. **前回と画面内容が完全一致する場合は何も描かない。**
-   `Display::renderTimeline()`が描画対象からFNV-1aハッシュを作り(`contentSignature()`)、
-   前回と一致すれば何も描かず`false`を返す。`showBootMessage()`は画面を丸ごと
-   上書きするので、この署名の状態を捨てる。時計はヘッダー右の矩形のみ毎秒部分更新
-   (数字とコロンのグリフは起動時にラスタライズしてキャッシュ)。タイムライン全体は
-   分が変わるごと・取得成功時・シリアル受信完了時に描き直す。予定の強調段階が変わった
-   直後の明滅(5秒間・2Hz)は該当矩形だけの部分更新で行う。
-7. **オンチップデバッグは使えない見込みだが未検証。** ESP32-S3自体はUSB-JTAGを
-   内蔵しているが、この基板のネイティブUSBポートでJTAGが使えるかは**未検証**。
-   切り分けは`ESP_LOG*`と`idf.py monitor`で行う。
-8. **予定はWi-Fi経由でサーバから取得する。** TLSは証明書を埋め込まず
-   `esp_crt_bundle`(公的CAバンドル)で検証する。サーバ証明書は
-   `*.asahi-kasei.co.jp` ← GlobalSign RSA OV SSL CA 2018 ← GlobalSign Root CA - R3。
-9. **HTTPのリダイレクトは追わない**(`disable_auto_redirect = true`)。
-   devcontainerから叩くとEntra IDのログインへ302されることを実測している。
-   デバイス側で対話的なOAuth2は通せないので、3xxはログに`Location`を出して失敗扱いにする。
-   **社内Wi-Fi(PLNV_COA)から同じ302になるかは未検証。**
-10. **資格情報は`main/secrets.h`に置き、gitで追跡しない。** ソースへの直書きはしない。
-11. **中止済み(`isCancelled`)と終日(`isAllDay`)の予定は表示しない。**
-    終日予定は00:00〜翌00:00の24時間枠として返るため、6時間タイムラインを丸ごと潰す。
-    除外は解析失敗と区別してカウントする(`json_parser.cpp`の`filtered`)。全件が除外
-    されただけの日を「取得失敗」と誤判定させないため。
-12. **書き込みとシリアル監視はWindows側で行う。USB/IPは使わない。**
-    USB/IP経由では6分以上かかり、起動ログも取りこぼす(理由と実測はREADMEの
-    「書き込みとログ取得」章。ただしこの数値はM5Paper・cp210xでの実測であり、
-    新基板のUSB-TO-UARTブリッジチップは未確認)。**`attach`するとWindows側がCOMポートを失い、
-    書き込み経路が壊れる**ので、指示があるときだけ行う。
-    **COMポート番号は新基板では未確定**(`bash tools/win.sh ports`で確認する)。
-    自動リセット(DTR/RTS)が効くかも**未検証**。
-13. **Windows側へ渡すファイルは文字コードを間違えると起動すらしない。**
-    - `.ps1`: UTF-8 **BOM付き**(BOM無しはCP932として読まれ構文エラー)
-    - `.bat`: **ASCIIのみ + CRLF + BOM無し**(CRLFは`.gitattributes`で担保)
-    - `tools/*.sh`: UTF-8 BOM無し + LF
-14. **PSRAM(Octal、80MHz)は`CONFIG_SPIRAM_FETCH_INSTRUCTIONS`/
-    `CONFIG_SPIRAM_RODATA`を有効にしている。** RGB表示中にフラッシュアクセスが
-    走ると画面が乱れる対策で、命令・読み出し専用データをPSRAM上へ再配置する。
-    外すと表示が乱れる可能性がある。
 
 ## C++ファイル編集時のルール
 
@@ -163,11 +64,12 @@ idf.py build
   ログは1行ずつ`logs/`へ流れてくる。ユーザーに依頼するのは**その起動1回だけ**
   (従来の`ssh -N devcontainer`の置き換え)。起動していない場合は`tools/win.sh`が
   10秒でタイムアウトして失敗する。COMポートが不明なときは`bash tools/win.sh ports`、
-  書き換えずに疎通だけ見るときは`bash tools/win.sh probe port=COM11`を使う。
+  書き換えずに疎通だけ見るときは`bash tools/win.sh probe port=COM4`を使う。
   完了待ちはポーリングではなくマーカー待ちで行う。
-- **COM番号は新基板では未確定。** `bash tools/win.sh ports`で確認すること
-  (M5Paper時代の実測値COM11が`tools/flash.sh`の既定値に残っているが、新基板では
-  未検証)。
+- **使うのはネイティブUSBポート**(`VID:PID=303A:1001`)。`tools/flash.sh`の既定値は
+  COM4。PC構成が変わったら`bash tools/win.sh ports`で番号を確認すること。
+  **CH343側(`USB TO UART`ポート)は書き込み・監視に使えない**(ROMブートローダに
+  到達できない)。
 - **USB/IPは通常使わない**ため`/dev/ttyUSB0`は存在しないのが正常。使うには
   `~/.ssh/config`に`RemoteForward 3240 127.0.0.1:3240`を戻すか`ssh -N -R`を別途張る
   必要がある(常設すると`ssh`/`scp`のたびに`remote port forwarding failed`が出る)。
@@ -290,9 +192,12 @@ tail -f logs/monitor.log | grep -E --line-buffered \
 | 変更したもの | 更新するmd |
 |---|---|
 | 仕様(プロトコル、画面レイアウト、フォント、表示条件、時刻の扱い) | `docs/spec.md` |
-| ビルド手順、devcontainer構成、IDFバージョン | `README.md`(ビルド章)、`CLAUDE.md`(冒頭と確認コマンド) |
-| 書き込み・ログ取得の手順(`win-agent.bat` / `win-agent.ps1` / `win.sh` / `win-agent.sh` / `flash.sh` / `win_flash.py` / `stage-winflash.sh`) | `README.md`(書き込みとログ取得章)、`CLAUDE.md`(ディレクトリ構成・実装上の決定事項12と13・確認コマンド) |
+| ビルド手順、devcontainer構成、IDFバージョン | `README.md`(ビルド章)、`CLAUDE.md`(確認コマンド) |
+| 書き込み・ログ取得の手順(`win-agent.bat` / `win-agent.ps1` / `win.sh` / `win-agent.sh` / `flash.sh` / `win_flash.py` / `stage-winflash.sh`) | `README.md`(書き込みとログ取得章)、`docs/implementation-notes.md`、`CLAUDE.md`(確認コマンド) |
+| 基板のハードウェア制御(RGBパネル、LovyanGFX、CH422G、書き込み経路) | `docs/waveshare-esp32s3-7b-display.md`(他プロジェクトへ渡す参考資料) |
+| 構成、実装上の制約 | `docs/implementation-notes.md` |
 | 開発ルール、エージェントの行動規範 | `CLAUDE.md` |
 
-`CLAUDE.md`は開発ルールと「知らずに触ると壊れる制約」だけを持つ。製品の仕様は
-`docs/spec.md`に書き、ここには書かない。
+`CLAUDE.md`には**行動ルールだけ**を書く。構成・実装上の制約は
+`docs/implementation-notes.md`、製品の仕様は`docs/spec.md`、基板のハードウェア制御は
+`docs/waveshare-esp32s3-7b-display.md`。**ここに仕様・経緯・ログ・実測値を書かないこと。**

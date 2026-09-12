@@ -6,6 +6,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "mbedtls/base64.h"
+
 #include "font_ttf.h"
 #include "lcd_panel.h"
 #include "time_util.h"
@@ -16,11 +21,9 @@ static const char* TAG = "display";
 // 色(RGB888のuint32_t)。LovyanGFXはuint32_tをRGB888として解釈するため、
 // 描画呼び出しではuint16_tを使わずここにまとめた値だけを使う。
 static const uint32_t COLOR_BG               = 0x121212;
-static const uint32_t COLOR_HEADER_BG        = 0x1E1E1E;
 static const uint32_t COLOR_TEXT             = 0xE8E8E8;
 static const uint32_t COLOR_MUTED_TEXT       = 0x9E9E9E;
 static const uint32_t COLOR_HOUR_LINE        = 0x3A3A3A;
-static const uint32_t COLOR_HALF_HOUR_LINE   = 0x262626;
 static const uint32_t COLOR_LABEL_DIVIDER    = 0x505050;
 static const uint32_t COLOR_NOW_LINE         = 0xFF5252;
 static const uint32_t COLOR_EVENT_FILL       = 0x263B52;
@@ -113,13 +116,17 @@ void Display::addOrExtendBlink(uint32_t key, const LayoutEvent& le, int level,
         }
     }
 
+    const uint32_t start_ms = now_ms + BLINK_START_DELAY_MS;
+
     BlinkEntry b;
     b.key            = key;
     b.layout         = le;
     b.level          = level;
-    b.expire_ms      = now_ms + BLINK_DURATION_MS;
-    b.next_toggle_ms = now_ms + BLINK_HALF_PERIOD_MS;
-    b.phase          = true;
+    b.expire_ms      = start_ms + BLINK_DURATION_MS;
+    b.next_toggle_ms = start_ms;
+    // 最初のトグルで強調側(phase=true)になるようfalseで登録する。
+    // renderTimeline()が直前にphase=falseで描いているので、これで見た目が繋がる。
+    b.phase          = false;
     _blinks.push_back(b);
 }
 
@@ -134,6 +141,8 @@ uint32_t Display::contentSignature(const std::vector<Event>& events,
         h = fnv1a(h, &e.end_utc, sizeof(e.end_utc));
         h = fnv1a(h, e.title.data(), e.title.size());
         h = fnv1a(h, e.location.data(), e.location.size());
+        const uint8_t tentative = e.is_tentative ? 1 : 0;
+        h = fnv1a(h, &tentative, sizeof(tentative));
     }
     return h;
 }
@@ -148,11 +157,20 @@ bool Display::begin() {
     }
 
     _canvas.setPsram(true);
-    _canvas.setColorDepth(lgfx::color_depth_t::rgb565_2Byte);
-    if (_canvas.createSprite(SCR_W, SCR_H) == nullptr) {
-        ESP_LOGE(TAG, "描画用スプライトを確保できない(%dx%d rgb565)", SCR_W, SCR_H);
+    // 転送先のフレームバッファと同じ並びにする。ここが食い違うとpushSprite()が
+    // バイト入れ替えを伴う変換になり、色も速度も損なう(lcd_panel.cppのコメント参照)。
+    _canvas.setColorDepth(lgfx::color_depth_t::rgb565_nonswapped);
+    // パネルと同じ生の向き(1024x600)で確保し、回転はスプライト側に持たせる。
+    // こうするとpushSprite()が同じ向きどうしの転送になり、行単位の連続コピーになる
+    // (向きが食い違う回転を伴う転送は61万画素すべてがPSRAMのキャッシュラインを
+    // またぐため極端に遅い。実測で全画面転送が832ms掛かっていた)。
+    if (_canvas.createSprite(LCD_PHYS_W, LCD_PHYS_H) == nullptr) {
+        ESP_LOGE(TAG, "描画用スプライトを確保できない(%dx%d rgb565)", LCD_PHYS_W, LCD_PHYS_H);
         return false;
     }
+    // setRotation()はcreateSprite()の後に呼ぶこと。描画コードは論理座標
+    // (SCR_W x SCR_H = 600x1024)のまま変更しない。
+    _canvas.setRotation(LCD_ROTATION);
     _canvas.setTextWrap(false);
 
     esp_err_t err = fontTtfInit();
@@ -179,6 +197,10 @@ void Display::showFatalMessage(const std::string& msg) {
     }
 
     // スプライトもTTFも当てにできない状況なので、LCDへ内蔵フォントで直接描く。
+    // _gfxは回転なし(生の1024x600)なので、ここでだけ回転をかけて論理座標
+    // (SCR_W x SCR_H = 600x1024)で描く。致命エラーの告知でそのまま停止する
+    // 経路なので回転を戻す必要はない。
+    _gfx->setRotation(LCD_ROTATION);
     _gfx->startWrite();
     _gfx->fillScreen(COLOR_BG);
     _gfx->setFont(&lgfx::fonts::efontJA_24_b);
@@ -214,9 +236,37 @@ void Display::pushRect(int x, int y, int w, int h) {
     if (_gfx == nullptr) return;
     if (w <= 0 || h <= 0) return;
 
-    _gfx->setClipRect(x, y, w, h);
+    // _gfxは回転なし(生の1024x600)なので、論理座標(600x1024)を生座標へ直してから
+    // クリップを掛ける。変換式はLovyanGFXのPanel_FrameBufferBase::_rotate_pixelcopy()の
+    // 回転1の扱いに合わせたもの(y反転 → x/yとw/hの入れ替え)。
+    const int nx = SCR_H - (y + h);
+    const int ny = x;
+    const int nw = h;
+    const int nh = w;
+
+    _gfx->setClipRect(nx, ny, nw, nh);
     _canvas.pushSprite(_gfx, 0, 0);
     _gfx->clearClipRect();
+}
+
+void Display::setPerfOverlay(bool enabled) {
+    _perf_overlay = enabled;
+}
+
+void Display::drawPerfOverlay() {
+    if (!_perf_overlay) return;
+    if (_gfx == nullptr) return;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "R:%ums P:%ums",
+             (unsigned)(_last_render_us / 1000), (unsigned)(_last_push_us / 1000));
+
+    const int y = SCR_H - FS_PERF - 6;
+    _canvas.fillRect(0, y, 200, FS_PERF + 6, COLOR_BG);
+    fontTtfDrawText(&_canvas, buf, 4, SCR_H - 4, FS_PERF, COLOR_MUTED_TEXT, COLOR_BG,
+                    lgfx::textdatum_t::bottom_left);
+
+    pushRect(0, y, 200, FS_PERF + 6);
 }
 
 void Display::drawClock(const std::string& time_str) {
@@ -225,9 +275,9 @@ void Display::drawClock(const std::string& time_str) {
     const int rx = clockRectX();
     const int ry = clockRectY();
 
-    _canvas.fillRect(rx, ry, rw, rh, COLOR_HEADER_BG);
+    _canvas.fillRect(rx, ry, rw, rh, COLOR_BG);
     fontTtfDrawCachedText(&_canvas, time_str, SCR_W - 20, ry + rh / 2, COLOR_TEXT,
-                          COLOR_HEADER_BG, lgfx::textdatum_t::middle_right);
+                          COLOR_BG, lgfx::textdatum_t::middle_right);
 }
 
 void Display::renderClock(uint32_t now_utc) {
@@ -245,11 +295,14 @@ void Display::renderClock(uint32_t now_utc) {
 }
 
 void Display::drawHeader(const struct tm& jst_now, uint32_t now_utc) {
-    _canvas.fillRect(0, 0, SCR_W, HEADER_H, COLOR_HEADER_BG);
+    // ヘッダーは本体と同じ背景色にし、下端の区切り線1本だけで本体と分ける
+    // (面で背景色を分けるとヘッダーだけ浮いて見えるため)。
+    _canvas.fillRect(0, 0, SCR_W, HEADER_H, COLOR_BG);
 
+    // 日付・曜日は小さく左に、時計は大きく右に置いて主従をはっきりさせる。
     std::string date_str = formatDate(jst_now);
     fontTtfDrawText(&_canvas, date_str, 20, HEADER_H / 2, FS_HEADER, COLOR_TEXT,
-                    COLOR_HEADER_BG, lgfx::textdatum_t::middle_left);
+                    COLOR_BG, lgfx::textdatum_t::middle_left);
 
     drawClock(formatClockStr(now_utc));
 
@@ -259,25 +312,22 @@ void Display::drawHeader(const struct tm& jst_now, uint32_t now_utc) {
 void Display::drawHourGrid(uint32_t display_start_utc, uint32_t display_end_utc) {
     _canvas.drawFastVLine(LABEL_W - 1, HEADER_H, SCR_H - HEADER_H, COLOR_LABEL_DIVIDER);
 
-    uint32_t t = (display_start_utc / 1800u) * 1800u;
-    if (t < display_start_utc) t += 1800u;
+    // 12時間表示では30分刻みの補助線は間隔が狭すぎて密になるため、1時間線のみ引く。
+    uint32_t t = (display_start_utc / 3600u) * 3600u;
+    if (t < display_start_utc) t += 3600u;
 
-    for (; t <= display_end_utc; t += 1800u) {
+    for (; t <= display_end_utc; t += 3600u) {
         int y = HEADER_H + (int)((t - display_start_utc) * pxPerSec());
         if (y < HEADER_H || y >= SCR_H) continue;
 
-        bool is_hour = (t % 3600u) == 0;
-        uint32_t color = is_hour ? COLOR_HOUR_LINE : COLOR_HALF_HOUR_LINE;
-        _canvas.drawFastHLine(CONTENT_X, y, SCR_W - CONTENT_X, color);
+        _canvas.drawFastHLine(CONTENT_X, y, SCR_W - CONTENT_X, COLOR_HOUR_LINE);
 
-        if (is_hour) {
-            time_t jst_t = (time_t)(t + JST_OFFSET);
-            struct tm ht;
-            gmtime_r(&jst_t, &ht);
-            fontTtfDrawText(&_canvas, formatHour(ht.tm_hour), LABEL_W / 2, y + 4,
-                            FS_HEADER, COLOR_MUTED_TEXT, COLOR_BG,
-                            lgfx::textdatum_t::top_center);
-        }
+        time_t jst_t = (time_t)(t + JST_OFFSET);
+        struct tm ht;
+        gmtime_r(&jst_t, &ht);
+        fontTtfDrawText(&_canvas, formatHour(ht.tm_hour), LABEL_W / 2, y + 8,
+                        FS_TICK, COLOR_MUTED_TEXT, COLOR_BG,
+                        lgfx::textdatum_t::top_center);
     }
 }
 
@@ -299,7 +349,7 @@ Display::BoxRect Display::eventBoxRect(const LayoutEvent& le, uint32_t display_s
 
     const float px_sec = pxPerSec();
     const int   col_w  = CONTENT_W / le.total_cols;
-    const int   pad    = 3;
+    const int   pad    = 3; // 列(横)方向の隙間。左右3pxずつで隣接列との間隔は計6px
 
     int y_top = HEADER_H + (int)((clipped_start - display_start_utc) * px_sec);
     int y_bot = HEADER_H + (int)((clipped_end - display_start_utc) * px_sec);
@@ -309,7 +359,8 @@ Display::BoxRect Display::eventBoxRect(const LayoutEvent& le, uint32_t display_s
     r.x = x_left;
     r.y = y_top;
     r.w = x_right - x_left;
-    r.h = y_bot - y_top;
+    // 時間方向(縦)に隣接する予定が繋がって見えないよう、下端を2px削って隙間を作る。
+    r.h = std::max(0, y_bot - y_top - 2);
     return r;
 }
 
@@ -330,24 +381,52 @@ void Display::drawEventBox(const LayoutEvent& le, int level, bool blink_phase,
         _canvas.drawRoundRect(r.x + i, r.y + i, r.w - 2 * i, r.h - 2 * i, rad, border_color);
     }
 
+    if (le.event.is_tentative) {
+        dashRoundRectEdges(r, border_w, fill_color);
+    }
+
     const bool in_progress = le.event.start_utc <= now_utc && now_utc < le.event.end_utc;
     if (in_progress) {
         _canvas.fillRect(r.x, r.y, 6, r.h, COLOR_IN_PROGRESS_BAND);
     }
 
-    const int tx = r.x + (in_progress ? 6 : 0) + 6;
-    const int ty = r.y + 6;
+    // 実機で縦が狭く件名・場所が入りきらなかったため、縦方向の余白だけを
+    // 横方向より詰めている(横は+8のまま、縦は+4)。行間も+10から+2に詰め、
+    // 小さい枠でも2行(件名+場所)が収まるようにする。
+    const int tx = r.x + (in_progress ? 6 : 0) + 8;
+    const int ty = r.y + 4;
 
     _canvas.setClipRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
-    if (r.h >= FS_EVENT + 10) {
+    if (r.h >= FS_EVENT + 6) {
         fontTtfDrawText(&_canvas, le.event.title, tx, ty, FS_EVENT, text_color, fill_color,
                         lgfx::textdatum_t::top_left);
     }
-    if (r.h >= FS_EVENT * 2 + 18 && !le.event.location.empty()) {
-        fontTtfDrawText(&_canvas, le.event.location, tx, ty + FS_EVENT + 4, FS_EVENT,
+    if (r.h >= FS_EVENT * 2 + 10 && !le.event.location.empty()) {
+        fontTtfDrawText(&_canvas, le.event.location, tx, ty + FS_EVENT + 2, FS_EVENT,
                         text_color, fill_color, lgfx::textdatum_t::top_left);
     }
     _canvas.clearClipRect();
+}
+
+void Display::dashRoundRectEdges(const BoxRect& r, int border_w, uint32_t gap_color) {
+    const int radius = 6; // drawEventBox()のfillRoundRect()/drawRoundRect()と同じ値
+    const int period = DASH_ON_PX + DASH_OFF_PX;
+
+    const int x0 = r.x + radius;
+    const int x1 = r.x + r.w - radius;
+    for (int x = x0 + DASH_ON_PX; x < x1; x += period) {
+        const int w = std::min(DASH_OFF_PX, x1 - x);
+        _canvas.fillRect(x, r.y, w, border_w, gap_color);
+        _canvas.fillRect(x, r.y + r.h - border_w, w, border_w, gap_color);
+    }
+
+    const int y0 = r.y + radius;
+    const int y1 = r.y + r.h - radius;
+    for (int y = y0 + DASH_ON_PX; y < y1; y += period) {
+        const int h = std::min(DASH_OFF_PX, y1 - y);
+        _canvas.fillRect(r.x, y, border_w, h, gap_color);
+        _canvas.fillRect(r.x + r.w - border_w, y, border_w, h, gap_color);
+    }
 }
 
 void Display::redrawBoxAndNowLine(const LayoutEvent& le, int level, bool blink_phase,
@@ -436,6 +515,9 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
         return false;
     }
 
+    const int64_t render_start_us = esp_timer_get_time();
+    fontTtfProfileReset(); // 一時的な内訳計測
+
     _last_display_start_utc = display_start_utc;
     _last_display_end_utc   = display_end_utc;
 
@@ -446,17 +528,23 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
     new_history.reserve(layout.size());
 
     _gfx->startWrite();
+    // 内訳の計測(一時的。オーバーレイが有効なときだけログへ出す)。
+    const int64_t t0_us = esp_timer_get_time();
     _canvas.fillScreen(COLOR_BG);
+    const int64_t t1_us = esp_timer_get_time();
 
     drawHeader(jst_now, now_utc);
+    const int64_t t2_us = esp_timer_get_time();
     drawHourGrid(display_start_utc, display_end_utc);
+    const int64_t t3_us = esp_timer_get_time();
 
     for (const auto& le : layout) {
         uint32_t key       = eventKey(le.event);
         int      level     = emphasisLevel(le.event.start_utc, now_utc);
         int      old_level = findHistoryLevel(key);
 
-        if (level > 0 && (old_level < 0 || old_level != level)) {
+        // 仮の予定は明滅させない(枠色と破線だけで示す)。
+        if (level > 0 && !le.event.is_tentative && (old_level < 0 || old_level != level)) {
             addOrExtendBlink(key, le, level, now_ms);
         }
         new_history.push_back({key, level});
@@ -465,14 +553,36 @@ bool Display::renderTimeline(ScheduleStore& store, uint32_t now_utc) {
     }
     _emphasis_history = std::move(new_history);
 
+    const int64_t t4_us = esp_timer_get_time();
     drawNowLineFull();
 
+    const int64_t push_start_us = esp_timer_get_time();
     _canvas.pushSprite(_gfx, 0, 0);
+    const int64_t push_end_us = esp_timer_get_time();
     _gfx->endWrite();
+
+    _last_push_us   = (uint32_t)(push_end_us - push_start_us);
+    _last_render_us = (uint32_t)(push_end_us - render_start_us);
 
     _has_rendered   = true;
     _last_signature = sig;
     _last_clock_str = formatClockStr(now_utc);
+
+    drawPerfOverlay();
+
+    // 画面のオーバーレイだけでは1点しか読めないため、毎回の再描画でログにも出す。
+    if (_perf_overlay) {
+        uint32_t ft_us = 0, blit_us = 0;
+        fontTtfProfileGet(&ft_us, &blit_us);
+        ESP_LOGI(TAG, "文字内訳 FreeType=%ums 転送=%ums", (unsigned)(ft_us / 1000),
+                (unsigned)(blit_us / 1000));
+        ESP_LOGI(TAG, "描画 R=%ums P=%ums 予定%u件 (背景%ums ヘッダ%ums 目盛%ums 予定枠%ums)",
+                (unsigned)(_last_render_us / 1000), (unsigned)(_last_push_us / 1000),
+                (unsigned)layout.size(),
+                (unsigned)((t1_us - t0_us) / 1000), (unsigned)((t2_us - t1_us) / 1000),
+                (unsigned)((t3_us - t2_us) / 1000), (unsigned)((t4_us - t3_us) / 1000));
+    }
+
     return true;
 }
 
@@ -505,4 +615,62 @@ void Display::tickBlink(uint32_t now_utc, uint32_t now_ms) {
             i++;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// スクリーンショット出力(一時的なデバッグ機能。サーバ到達性が確認できたら撤去する)。
+
+void Display::dumpScreenshot() {
+    if (_gfx == nullptr) return;
+
+    // 出力画像は論理座標基準で横300(=SCR_W/2)、縦512(=SCR_H/2)。
+    static const int OUT_W = SCR_W / 2;
+    static const int OUT_H = SCR_H / 2;
+
+    const uint16_t* buf = (const uint16_t*)_canvas.getBuffer();
+    if (buf == nullptr) {
+        ESP_LOGW(TAG, "スプライトのバッファが取得できないためスクリーンショットを中止する");
+        return;
+    }
+
+    // 1行ぶんの生データ(300画素=600バイト)とBase64文字列(800文字+終端)。
+    // app_main()のスタックを圧迫しないようstaticに置く。
+    static uint8_t row_raw[OUT_W * 2];
+    static char    row_b64[((OUT_W * 2 + 2) / 3) * 4 + 1];
+
+    ESP_LOGI(TAG, "SHOT BEGIN %d %d", OUT_W, OUT_H);
+
+    for (int oy = 0; oy < OUT_H; oy++) {
+        const int y = oy * 2; // 論理y(縦を1/2に間引く)
+
+        for (int ox = 0; ox < OUT_W; ox++) {
+            const int x = ox * 2; // 論理x(横を1/2に間引く)
+
+            // スプライトは生の向き(1024x600、LCD_PHYS_W x LCD_PHYS_H)で確保し、
+            // setRotation(LCD_ROTATION=1)を掛けて論理座標(600x1024)で描いている。
+            // pushRect()が使っている回転1の変換(nx = SCR_H - (y + h)、ny = x)を
+            // 1画素(w=h=1)に当てはめると、生座標は raw_x = SCR_H - 1 - y、
+            // raw_y = x になる。生バッファは幅LCD_PHYS_W(1024)の行優先(row-major)
+            // で確保されているので、raw_yが行、raw_xが列となり、
+            // index = raw_y * LCD_PHYS_W + raw_x = x * LCD_PHYS_W + (SCR_H - 1 - y)。
+            const int index = x * LCD_PHYS_W + (SCR_H - 1 - y);
+            const uint16_t px = buf[index];
+            row_raw[ox * 2 + 0] = (uint8_t)(px & 0xFF);
+            row_raw[ox * 2 + 1] = (uint8_t)((px >> 8) & 0xFF);
+        }
+
+        size_t out_len = 0;
+        int err = mbedtls_base64_encode((unsigned char*)row_b64, sizeof(row_b64), &out_len,
+                                        row_raw, sizeof(row_raw));
+        if (err != 0) {
+            ESP_LOGW(TAG, "Base64エンコードに失敗した(行%d、err=%d)", oy, err);
+        } else {
+            ESP_LOGI(TAG, "SHOT %d %s", oy, row_b64);
+        }
+
+        // ウォッチドッグに引っかからないよう1行ごとに他タスクへ譲る。
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    ESP_LOGI(TAG, "SHOT END");
 }

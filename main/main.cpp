@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 
 #include "display.h"
+#include "dummy_schedule.h"
 #include "http_client.h"
 #include "io_ext.h"
 #include "json_parser.h"
@@ -17,13 +18,26 @@
 #include "schedule.h"
 #include "secrets.h"
 #include "serial_link.h"
+#include "sntp_time.h"
 #include "time_util.h"
 #include "wifi_link.h"
 
 static const char* TAG = "main";
 
-// Wi-Fi接続を待つ上限。社内APは認証に時間がかかることがあるので長めに取る。
+// secrets.hでUSE_DUMMY_SCHEDULEを1にすると、HTTP取得を行わずダミー予定を表示する。
+// サーバへ到達できない環境での暫定手段。到達性が確認できたら撤去する。
+#if !defined(USE_DUMMY_SCHEDULE)
+#define USE_DUMMY_SCHEDULE 0
+#endif
+
+// Wi-Fi接続を待つ上限。接続確立後、切断からの再接続を待つ側で使う。
+// 社内APは認証に時間がかかることがあるので長めに取る。
 static const uint32_t WIFI_TIMEOUT_MS = 20000;
+// 起動時に候補を1つ試すときの上限。候補が複数あるので短めにして次候補へ早く移る。
+static const uint32_t WIFI_CANDIDATE_TIMEOUT_MS = 15000;
+// SNTPの同期待ち。10秒では実機でタイムアウトすることがあったため長めに取る
+// (名前解決とNTPの往復を含む。失敗しても表示は続けるので待つ側に倒す)。
+static const uint32_t SNTP_TIMEOUT_MS = 25000;
 // HTTPS 1回あたりの上限。TLSハンドシェイクを含む。
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 // 取得に失敗したときの再試行間隔。POLL_INTERVAL_SEC(既定300)より短くする。
@@ -32,6 +46,17 @@ static const uint32_t RETRY_INTERVAL_SEC = 60;
 static const uint32_t LOOP_TICK_MS = 100;
 // 起動後、表示ができてから点灯するバックライトの輝度(%)。
 static const uint8_t BACKLIGHT_PERCENT = 80;
+// タイムライン全体の再描画は重いので、分の変わり目(秒=0)を避けてこの秒へずらす。
+// 00秒には時計の部分更新だけを行い、時計が止まって見えないようにする。
+static const int TIMELINE_REDRAW_SEC = 5;
+
+#if USE_DUMMY_SCHEDULE
+// ダミーモードのときだけ使う。最初のタイムライン描画からこの時間後に
+// スクリーンショットをログへ出し、以後もこの間隔で繰り返す(一時的なデバッグ機能。
+// サーバ到達性が確認できたら撤去する)。繰り返すのは、監視を繋いでいない間に
+// 起きた再描画の計測値を画面のオーバーレイ経由で読み取れるようにするため。
+static const uint32_t SCREENSHOT_INTERVAL_MS = 20000;
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -48,6 +73,12 @@ static uint32_t nextAlignedUtc(uint32_t now, uint32_t step_sec) {
 static bool fetchSchedule(ScheduleStore* store) {
     if (store == nullptr) return false;
 
+#if USE_DUMMY_SCHEDULE
+    // サーバへ到達できない環境向けの暫定経路。HTTPは一切呼ばない。
+    // 時刻はSNTPが入れたシステム時刻をそのまま使うので、ここではsetSystemTime()を呼ばない。
+    ESP_LOGW(TAG, "ダミーモード: サーバへは接続していない");
+    return parseScheduleJson(dummyScheduleJson(nowUtc()), store, nullptr);
+#else
     if (!wifiLinkIsConnected() && !wifiLinkWaitConnected(WIFI_TIMEOUT_MS)) {
         ESP_LOGW(TAG, "Wi-Fi未接続のため取得を見送る");
         return false;
@@ -78,6 +109,7 @@ static bool fetchSchedule(ScheduleStore* store) {
         setSystemTime(new_time);
     }
     return true;
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +124,10 @@ extern "C" void app_main(void) {
     if (ioExtBegin() != ESP_OK) {
         ESP_LOGE(TAG, "[IO] IOエキスパンダの初期化に失敗した(続行する)");
     }
+
+    // 一時的な調査用。タッチICのI2Cアドレスを確定させたら、この呼び出しと
+    // ioExtScanBus()そのものを撤去する。
+    ioExtScanBus();
 
     // LCDパネルは表示の前提そのものなので、失敗したら止める。
     // オンチップデバッグが無い基板なので、ここで停止してログだけを頼りに切り分ける。
@@ -121,6 +157,10 @@ extern "C" void app_main(void) {
         }
     }
 
+#if USE_DUMMY_SCHEDULE
+    display.setPerfOverlay(true);
+#endif
+
     display.showBootMessage("Wi-Fi接続中...");
 
     // 表示ができてから点灯する(初期化中の乱れた画面を見せないため)。
@@ -128,36 +168,97 @@ extern "C" void app_main(void) {
         ESP_LOGW(TAG, "[IO] バックライトの点灯に失敗した");
     }
 
-    // secrets.hでWIFI_STATIC_IPを定義したときだけ固定IPで接続する。
-    // 未定義ならDHCPのまま(nullptrを渡す)。
+    // secrets.hでWIFI_STATIC_IP(候補2・候補3は_2/_3付き)を定義したときだけ、
+    // その候補は固定IPで接続する。未定義ならDHCPのまま(nullptrを渡す)。
 #ifdef WIFI_STATIC_IP
-    const WifiStaticIp static_ip = {
+    const WifiStaticIp static_ip_1 = {
         WIFI_STATIC_IP,
         WIFI_STATIC_GATEWAY,
         WIFI_STATIC_NETMASK,
         WIFI_STATIC_DNS1,
         WIFI_STATIC_DNS2,
     };
-    const WifiStaticIp* static_ip_ptr = &static_ip;
+    const WifiStaticIp* static_ip_1_ptr = &static_ip_1;
 #else
-    const WifiStaticIp* static_ip_ptr = nullptr;
+    const WifiStaticIp* static_ip_1_ptr = nullptr;
+#endif
+    // 候補2・候補3のIP設定は、そのSSID自体が定義されているときだけ意味を持つ。
+    // SSID未定義のときにポインタ変数だけ作ると未使用変数の警告になるため、
+    // WIFI_SSID_2/3のifdefの中で完結させる。
+#ifdef WIFI_SSID_2
+#ifdef WIFI_STATIC_IP_2
+    const WifiStaticIp static_ip_2 = {
+        WIFI_STATIC_IP_2,
+        WIFI_STATIC_GATEWAY_2,
+        WIFI_STATIC_NETMASK_2,
+        WIFI_STATIC_DNS1_2,
+        WIFI_STATIC_DNS2_2,
+    };
+    const WifiStaticIp* static_ip_2_ptr = &static_ip_2;
+#else
+    const WifiStaticIp* static_ip_2_ptr = nullptr;
+#endif
+#endif
+#ifdef WIFI_SSID_3
+#ifdef WIFI_STATIC_IP_3
+    const WifiStaticIp static_ip_3 = {
+        WIFI_STATIC_IP_3,
+        WIFI_STATIC_GATEWAY_3,
+        WIFI_STATIC_NETMASK_3,
+        WIFI_STATIC_DNS1_3,
+        WIFI_STATIC_DNS2_3,
+    };
+    const WifiStaticIp* static_ip_3_ptr = &static_ip_3;
+#else
+    const WifiStaticIp* static_ip_3_ptr = nullptr;
+#endif
 #endif
 
-    esp_err_t werr = wifiLinkBegin(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT_MS, static_ip_ptr);
+    WifiCandidate candidates[3];
+    size_t        candidate_count = 0;
+    candidates[candidate_count++] = {WIFI_SSID, WIFI_PASSWORD, static_ip_1_ptr};
+#ifdef WIFI_SSID_2
+    candidates[candidate_count++] = {WIFI_SSID_2, WIFI_PASSWORD_2, static_ip_2_ptr};
+#endif
+#ifdef WIFI_SSID_3
+    candidates[candidate_count++] = {WIFI_SSID_3, WIFI_PASSWORD_3, static_ip_3_ptr};
+#endif
+
+    esp_err_t werr = wifiLinkBegin(candidates, candidate_count, WIFI_CANDIDATE_TIMEOUT_MS);
     if (werr != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi接続に失敗した: %s", esp_err_to_name(werr));
         display.showBootMessage("Wi-Fi接続失敗\nシリアル待機中");
     } else {
         char ip[16];
+        char ssid[33];
         wifiLinkGetIp(ip, sizeof(ip));
-        ESP_LOGI(TAG, "Wi-Fi接続完了 IP=%s", ip);
+        wifiLinkGetSsid(ssid, sizeof(ssid));
+        ESP_LOGI(TAG, "Wi-Fi接続完了 SSID=%s IP=%s", ssid, ip);
+
+#if USE_DUMMY_SCHEDULE
+        // ダミーモードにはRTCどころかサーバ時刻すら無いので、Wi-Fi接続直後にSNTPで
+        // 実時刻を取る。失敗しても表示自体は続ける(時刻がずれるだけ)。
+        esp_err_t serr = sntpSyncTime(SNTP_TIMEOUT_MS);
+        if (serr != ESP_OK) {
+            ESP_LOGW(TAG, "SNTP同期に失敗した(続行する): %s", esp_err_to_name(serr));
+        }
+        display.showBootMessage("ダミーデータ表示中");
+#else
         display.showBootMessage("スケジュール取得中...");
+#endif
     }
 
     // 初回は接続の成否にかかわらず1度試す(失敗ならシリアル待機に落ちる)。
     bool     rendered       = false;
     uint32_t next_fetch_utc = 0;
     int      last_minute    = -1;
+    // 取得やシリアル受信でタイムラインの再描画が必要になったことを示すフラグ。
+    // 00秒に重い全画面再描画が集中しないよう、実際の再描画はTIMELINE_REDRAW_SECまで遅らせる。
+    bool     timeline_dirty = false;
+#if USE_DUMMY_SCHEDULE
+    // 最初のタイムライン描画時刻(ms、esp_timer基準)とスクリーンショット出力済みか。
+    uint32_t rendered_at_ms    = 0;
+#endif
 
     // サーバ経路が使えないときの保険として、PC(scheduler_sender.py)からの
     // シリアル受信も残してある。到達性が確認できたら撤去してよい。
@@ -169,8 +270,19 @@ extern "C" void app_main(void) {
             if (fetchSchedule(&store)) {
                 // 取得の中でサーバ時刻に合わせ直すので、境界の計算はその後に行う。
                 next_fetch_utc = nextAlignedUtc(nowUtc(), POLL_INTERVAL_SEC);
-                display.renderTimeline(store, nowUtc());
-                rendered = true;
+                if (!rendered) {
+                    // 初回だけ即描く(起動直後に数秒待たせないため)。
+                    display.renderTimeline(store, nowUtc());
+                    last_minute = (int)(nowUtc() / 60);
+                    rendered    = true;
+#if USE_DUMMY_SCHEDULE
+                    rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
+#endif
+                } else {
+                    // 2回目以降はTIMELINE_REDRAW_SECまで遅らせる。取得はX:00境界に
+                    // 揃うため、ここで即描くと結局00秒に重い処理が重なってしまう。
+                    timeline_dirty = true;
+                }
             } else {
                 // 失敗したときにPOLL_INTERVAL_SEC待つと、起動直後の
                 // 一時的なAP不在で画面が長時間止まる。短い間隔で作り直す。
@@ -182,13 +294,34 @@ extern "C" void app_main(void) {
 
         if (rendered) {
             uint32_t now = nowUtc();
-            int cur_minute = (int)(now / 60);
-            if (cur_minute != last_minute) {
-                display.renderTimeline(store, now);
-                last_minute = cur_minute;
-            }
+
+            // 1. 時計を最優先で更新する。ここは部分更新なので軽い。
             display.renderClock(now);
+
+            // 2. タイムライン全体の再描画。00秒を避けてTIMELINE_REDRAW_SECへずらす。
+            int cur_minute = (int)(now / 60);
+            int cur_sec    = (int)(now % 60);
+            if (cur_sec >= TIMELINE_REDRAW_SEC && (cur_minute != last_minute || timeline_dirty)) {
+                display.renderTimeline(store, now);
+                last_minute    = cur_minute;
+                timeline_dirty = false;
+            }
+
+            // 3. 明滅。開始はBLINK_START_DELAY_MSだけ遅れるので00秒には重ならない。
             display.tickBlink(now, (uint32_t)(esp_timer_get_time() / 1000));
+
+#if USE_DUMMY_SCHEDULE
+            // 最初のタイムライン描画からSCREENSHOT_INTERVAL_MSごとに繰り返し出す
+            // (一時的なデバッグ機能)。
+            {
+                uint32_t elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000) - rendered_at_ms;
+                if (elapsed_ms >= SCREENSHOT_INTERVAL_MS) {
+                    ESP_LOGI(TAG, "スクリーンショットを出力する");
+                    display.dumpScreenshot();
+                    rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                }
+            }
+#endif
         }
 
         // LOOP_TICK_MS待って行が来なければfalse。ここがループの唯一の待ち。
@@ -205,8 +338,19 @@ extern "C" void app_main(void) {
                 setSystemTime(recv_time);
             }
 
-            display.renderTimeline(store, nowUtc());
-            rendered = true;
+            if (!rendered) {
+                // 起動メッセージからの初回描画だけは即時に行う(起動直後に
+                // 数秒待たせないため)。
+                display.renderTimeline(store, nowUtc());
+                last_minute = (int)(nowUtc() / 60);
+                rendered    = true;
+#if USE_DUMMY_SCHEDULE
+                rendered_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
+#endif
+            } else {
+                // 2回目以降はTIMELINE_REDRAW_SECまで遅らせ、00秒への集中を避ける。
+                timeline_dirty = true;
+            }
         }
     }
 }

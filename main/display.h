@@ -32,18 +32,29 @@ public:
     // 「内容が同じ」で飛ばさせないよう、署名・点滅・強調履歴の状態を捨てる。
     void showBootMessage(const std::string& msg);
 
-    // 6時間タイムラインを描く。表示窓は[now_utc - NOW_OFFSET_SEC, +DISP_HOURS時間]。
+    // 12時間タイムラインを描く。表示窓は[now_utc - NOW_OFFSET_SEC, +DISP_HOURS時間]。
     // 現在時刻線は常に画面上の同じY座標(HEADER_H + NOW_OFFSET_SEC分)に来る。
     // 前回と画面内容が完全に一致する場合は何も描かずfalseを返す。描いたらtrue。
     bool renderTimeline(ScheduleStore& store, uint32_t now_utc);
 
-    // ヘッダ右の時計(HH:MM:SS)だけを部分更新する。前回と同じ文字列なら何もしない。
+    // ヘッダ右の時計(HH:MM:SS)だけを部分更新する。
+    // 前回と同じ文字列なら何もしない。
     void renderClock(uint32_t now_utc);
 
     // 強調表示に入った予定枠の点滅を1ティック分進める。BLINK_HALF_PERIOD_MSごとに
     // フェーズを反転して該当矩形だけ再描画する。BLINK_DURATION_MSを過ぎたら
     // 通常表示(点滅なしの強調色)に戻して点滅対象から外す。
+    // 仮の予定(is_tentative)は明滅の対象にしない(枠色と破線だけで示す)。
     void tickBlink(uint32_t now_utc, uint32_t now_ms);
+
+    // 描画時間のオーバーレイ表示。ダミーモードなど、開発時にだけ有効にする。
+    // 有効にすると画面左下に直前の描画時間を小さく出す。
+    void setPerfOverlay(bool enabled);
+
+    // 画面の内容をログへ出す(一時的なデバッグ機能)。
+    // 縦横それぞれ1/2に間引いた300x512のRGB565をBase64で1行1ラインずつ出す。
+    // 開発用。サーバ到達性が確認できたら撤去する。
+    void dumpScreenshot();
 
 private:
     struct BoxRect {
@@ -74,6 +85,10 @@ private:
     void redrawBoxAndNowLine(const LayoutEvent& le, int level, bool blink_phase,
                              uint32_t now_utc);
 
+    // 仮の予定の枠を破線に見せる。実線で描いた角丸枠の直線部分へ、
+    // 等間隔にgap_colorを上書きする(LovyanGFXに破線のdrawRoundRect()が無いため)。
+    void dashRoundRectEdges(const BoxRect& r, int border_w, uint32_t gap_color);
+
     std::vector<LayoutEvent> layoutEvents(std::vector<Event> events);
     BoxRect eventBoxRect(const LayoutEvent& le, uint32_t display_start_utc,
                         uint32_t display_end_utc) const;
@@ -94,6 +109,9 @@ private:
     // スプライトの指定矩形だけをLCDへ転送する。
     void pushRect(int x, int y, int w, int h);
 
+    // 描画時間オーバーレイ(画面左下)。_perf_overlayがfalseなら何もしない。
+    void drawPerfOverlay();
+
     static int   nowLineY();
     static float pxPerSec() { return (float)TIMELINE_H / (DISP_HOURS * 3600); }
     static int   clockRectW();
@@ -104,30 +122,42 @@ private:
     // ─ 画面レイアウト(論理600x1024、縦置き) ─
     static const int SCR_W      = 600;
     static const int SCR_H      = 1024;
-    static const int HEADER_H   = 60;
+    static const int HEADER_H   = 76;
     static const int TIMELINE_H = SCR_H - HEADER_H;
-    static const int LABEL_W    = 70;
+    static const int LABEL_W    = 60;
     static const int CONTENT_X  = LABEL_W;
     static const int CONTENT_W  = SCR_W - LABEL_W;
-    static const int DISP_HOURS = 6;
+    static const int DISP_HOURS = 12;
     // 現在時刻線は表示窓の先頭からこの秒数だけ下に固定する
     // (窓の先頭 = now - NOW_OFFSET_SEC なので、現在時刻線のY座標は常に一定になる)。
     static const uint32_t NOW_OFFSET_SEC = 3600;
 
     // 各書体の実効ピクセル高さ(レイアウト計算用)。
     static const int FS_BOOT   = 46;
-    static const int FS_HEADER = 36;
-    static const int FS_CLOCK  = 40;
-    static const int FS_EVENT  = 22;
+    static const int FS_HEADER = 34;
+    static const int FS_TICK   = 20;
+    static const int FS_CLOCK  = 56;
+    static const int FS_EVENT  = 14;
+    // 描画時間オーバーレイの文字サイズ(一時的なデバッグ表示)。
+    static const int FS_PERF   = 14;
 
     // 点滅の総時間と半周期。半周期ごとにフェーズを反転する。
     static const uint32_t BLINK_DURATION_MS    = 5000;
     static const uint32_t BLINK_HALF_PERIOD_MS = 250;
 
+    // 明滅を開始するまでの遅延。タイムラインの再描画(重い)と同時に始まらないよう、
+    // 分の変わり目からさらに遅らせる。再描画がTIMELINE_REDRAW_SEC(5秒)なので、
+    // 明滅は10秒あたりから始まる。
+    static const uint32_t BLINK_START_DELAY_MS = 5000;
+
     // 強調段階のしきい値(開始までの残り秒数)。値が小さいほど強い強調。
     static const uint32_t EMPH_L1_SEC = 600;
     static const uint32_t EMPH_L2_SEC = 300;
     static const uint32_t EMPH_L3_SEC = 120;
+
+    // 仮の予定の破線枠。実線8px / 隙間5pxの周期で描く。
+    static const int DASH_ON_PX  = 8;
+    static const int DASH_OFF_PX = 5;
 
     LGFX_Device* _gfx = nullptr; // begin()前はnullptr
     LGFX_Sprite  _canvas;        // 600x1024 RGB565、PSRAM
@@ -141,4 +171,9 @@ private:
 
     std::vector<EmphasisRecord> _emphasis_history;
     std::vector<BlinkEntry>     _blinks;
+
+    // ─ 描画時間オーバーレイ(一時的なデバッグ表示) ─
+    bool     _perf_overlay   = false;
+    uint32_t _last_render_us = 0; // renderTimeline()全体
+    uint32_t _last_push_us   = 0; // pushSprite()だけ
 };
