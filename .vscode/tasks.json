@@ -1,0 +1,91 @@
+{
+	// ビルドと実機への書き込みをVSCodeから直接実行するためのタスク。
+	// エージェントを介さずに小さな変更を試せるようにするのが目的。
+	//
+	// 前提: Windows側でwin-agent.batが起動していること(書き込み・監視・ポート一覧)。
+	//       起動していないとtools/win.shが10秒でタイムアウトして失敗する。
+	// COMポート番号はtools/flash.shの既定値(COM21)を使う。番号が変わったら
+	// 「COMポート一覧」タスクで確認し、tools/flash.shのPORTを書き換える。
+	"version": "2.0.0",
+	"tasks": [
+		{
+			// 非対話シェルはPATHにidf.pyが無いのでexport.shの読み込みが必須。
+			"label": "ビルド",
+			"type": "shell",
+			"command": ". /opt/esp/idf/export.sh >/dev/null 2>&1 && idf.py build",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			// ビルド → ステージング → 書き込み → リセット → ログ取得まで通しで行う。
+			"label": "ビルドして書き込み",
+			"type": "shell",
+			"command": "bash tools/flash.sh --monitor 60",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			// ビルド済みの成果物をそのまま書き込む(ソースを触っていないときに使う)。
+			"label": "書き込みのみ",
+			"type": "shell",
+			"command": "bash tools/flash.sh --no-build --monitor 60",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			// 書き込まずにシリアルログだけを取る。アプリもESP-IDFもログを出さないので、
+			// 平常時はROMのブートログ以外は無音になる(無音は異常ではない)。
+			"label": "ログ監視(180秒)",
+			"type": "shell",
+			"command": "bash tools/win.sh monitor port=COM21 sec=180",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			// COMポート番号が変わったときの確認用。VID:PID=303A:1001がネイティブUSB。
+			"label": "COMポート一覧",
+			"type": "shell",
+			"command": "bash tools/win.sh ports",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		}
+	]
+}

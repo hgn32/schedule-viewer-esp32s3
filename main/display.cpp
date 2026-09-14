@@ -3,14 +3,11 @@
 #include <algorithm>
 #include <cstdio>
 
-#include "esp_log.h"
 #include "esp_timer.h"
 
 #include "font_ttf.h"
 #include "lcd_panel.h"
 #include "time_util.h"
-
-static const char* TAG = "display";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 色(RGB888のuint32_t)。LovyanGFXはuint32_tをRGB888として解釈するため、
@@ -147,7 +144,6 @@ uint32_t Display::contentSignature(const std::vector<Event>& events,
 bool Display::begin() {
     _gfx = lcdPanelGfx();
     if (_gfx == nullptr) {
-        ESP_LOGE(TAG, "LCDパネルが初期化されていない");
         return false;
     }
 
@@ -160,7 +156,6 @@ bool Display::begin() {
     // (向きが食い違う回転を伴う転送は61万画素すべてがPSRAMのキャッシュラインを
     // またぐため極端に遅い。実測で全画面転送が832ms掛かっていた)。
     if (_canvas.createSprite(LCD_PHYS_W, LCD_PHYS_H) == nullptr) {
-        ESP_LOGE(TAG, "描画用スプライトを確保できない(%dx%d rgb565)", LCD_PHYS_W, LCD_PHYS_H);
         return false;
     }
     // setRotation()はcreateSprite()の後に呼ぶこと。描画コードは論理座標
@@ -170,13 +165,11 @@ bool Display::begin() {
 
     esp_err_t err = fontTtfInit();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "TTFを読み込めない: %s", esp_err_to_name(err));
         return false;
     }
 
     err = fontTtfCacheGlyphs(CLOCK_CHARS, FS_CLOCK);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "時計用グリフキャッシュを作成できない: %s", esp_err_to_name(err));
         return false;
     }
 
@@ -187,7 +180,6 @@ void Display::showFatalMessage(const std::string& msg) {
     _has_rendered = false;
 
     if (_gfx == nullptr) {
-        ESP_LOGE(TAG, "致命的エラー(LCD未初期化のためログのみ): %s", msg.c_str());
         return;
     }
 
@@ -231,19 +223,24 @@ void Display::showBootMessage(const std::string& msg) {
         start = nl + 1;
     }
 
-    int line_h = fontTtfLineHeight(FS_BOOT);
-    if (line_h <= 0) line_h = FS_BOOT + 8;
-    const int total_h = line_h * (int)lines.size();
-    int y = SCR_H / 2 - total_h / 2 + line_h / 2;
+    // 1行目は見出し(状態)なので大きく、2行目以降は補足情報なので小さく描く。
+    int head_h = fontTtfLineHeight(FS_BOOT);
+    if (head_h <= 0) head_h = FS_BOOT + 8;
+    int sub_h = fontTtfLineHeight(FS_BOOT_SUB);
+    if (sub_h <= 0) sub_h = FS_BOOT_SUB + 6;
+
+    const int total_h = head_h + sub_h * ((int)lines.size() - 1);
+    int y = SCR_H / 2 - total_h / 2 + head_h / 2;
 
     _gfx->startWrite();
     _canvas.fillScreen(COLOR_BG);
-    for (const auto& line : lines) {
-        if (!line.empty()) {
-            fontTtfDrawText(&_canvas, line, SCR_W / 2, y, FS_BOOT, COLOR_TEXT, COLOR_BG,
-                            lgfx::textdatum_t::middle_center);
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (!lines[i].empty()) {
+            fontTtfDrawText(&_canvas, lines[i], SCR_W / 2, y, i == 0 ? FS_BOOT : FS_BOOT_SUB,
+                            COLOR_TEXT, COLOR_BG, lgfx::textdatum_t::middle_center);
         }
-        y += line_h;
+        // 次の行の中心まで進む。1行目と2行目の間だけ行高が変わる。
+        y += (i == 0) ? (head_h / 2 + sub_h / 2) : sub_h;
     }
     _canvas.pushSprite(_gfx, 0, 0);
     _gfx->endWrite();
@@ -389,20 +386,26 @@ void Display::drawEventBox(const LayoutEvent& le, int level, bool blink_phase,
         _canvas.fillRect(r.x, r.y, 6, r.h, COLOR_IN_PROGRESS_BAND);
     }
 
-    // 実機で縦が狭く件名・場所が入りきらなかったため、縦方向の余白だけを
-    // 横方向より詰めている(横は+8のまま、縦は+4)。行間も+10から+2に詰め、
-    // 小さい枠でも2行(件名+場所)が収まるようにする。
+    // 横方向は従来どおり(進行中は帯の幅6pxを加えて8px)。
     const int tx = r.x + (in_progress ? 6 : 0) + 8;
-    const int ty = r.y + 4;
+
+    // 縦方向はベースライン指定で置く。top_left指定だとhheaのascenderぶん
+    // 下がりすぎて30分枠で2行目が切れるため、実インク上端・下端の実測値
+    // (EVENT_INK_ASC/EVENT_INK_DESC、display.h参照)をもとにベースラインを直接決める。
+    const int base_title = r.y + EVENT_PAD_TOP + EVENT_INK_ASC;
+    const int base_loc   = base_title + EVENT_LINE_PITCH;
+    const int clip_bottom = r.y + r.h - 2; // setClipRect()の下端と同じ
 
     _canvas.setClipRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
-    if (r.h >= FS_EVENT + 6) {
-        fontTtfDrawText(&_canvas, le.event.title, tx, ty, FS_EVENT, text_color, fill_color,
-                        lgfx::textdatum_t::top_left);
+    // 件名: インク下端(base_title + EVENT_INK_DESC)が枠内に収まる高さがあれば描く。
+    if (base_title + EVENT_INK_DESC <= clip_bottom) {
+        fontTtfDrawText(&_canvas, le.event.title, tx, base_title, FS_EVENT, text_color,
+                        fill_color, lgfx::textdatum_t::baseline_left);
     }
-    if (r.h >= FS_EVENT * 2 + 10 && !le.event.location.empty()) {
-        fontTtfDrawText(&_canvas, le.event.location, tx, ty + FS_EVENT + 2, FS_EVENT,
-                        text_color, fill_color, lgfx::textdatum_t::top_left);
+    // 場所: 同様にインク下端が収まる高さがあれば描く。
+    if (base_loc + EVENT_INK_DESC <= clip_bottom && !le.event.location.empty()) {
+        fontTtfDrawText(&_canvas, le.event.location, tx, base_loc, FS_EVENT, text_color,
+                        fill_color, lgfx::textdatum_t::baseline_left);
     }
     _canvas.clearClipRect();
 }

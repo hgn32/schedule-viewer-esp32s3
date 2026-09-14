@@ -19,7 +19,7 @@ model: sonnet
   - `strcpy` / `sprintf` の使用禁止（`snprintf` を使う）
   - 公開関数の先頭でポインタ引数をNULL検査する
   - ブロッキング待ちは必ずタイムアウト付きで書く
-  - `main/protocol.cpp` / `main/schedule.cpp` / `main/time_util.h` にM5・ESP-IDF依存を持ち込まない
+  - `main/schedule.cpp` / `main/time_util.h` にM5・ESP-IDF依存を持ち込まない
   - Arduino API（`String` / `Serial` / `delay` など）を使わない
   - 「実装上の決定事項」に列挙された方針（M5Unified採用、IDFのv5固定、efontJA、直接描画など）を
     勝手に変えない。変更が必要だと考えた場合は実装せず、呼び出し元に理由を添えて報告する

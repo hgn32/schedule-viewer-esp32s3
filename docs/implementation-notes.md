@@ -13,8 +13,9 @@ RGB565パラレル16bit。基板を90度回して縦置き・論理600x1024で�
 Outlook予定表を12時間分のタイムラインとして表示するビューア。予定はWi-Fi(STA)経由で
 予定配信サーバのREST APIからHTTPSで取得する。Bluetoothは使わない。
 
-USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)は、サーバへの
-到達性が実機で確認できるまでフォールバックとして残してある。確認が取れたら撤去してよい。
+予定の取得経路は**HTTPSだけ**。以前あったUSBシリアル経由の受信経路
+(`serial_link` / `protocol` / `pc_python`)は、サーバへの到達性が実機で確認できたため
+撤去した。UART0は未使用になっている。
 
 言語は**C++**、フレームワークは**ESP-IDF v5.5**。ビルドはdevcontainer内でのみ行う。
 
@@ -22,13 +23,11 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 
 | パス | 役割 |
 |---|---|
-| `main/main.cpp` | `app_main()`。IO拡張→LCD→シリアル→フォント初期化 → ブートメッセージ → バックライト点灯 → Wi-Fi接続 → 定期GET → 再描画 |
-| `main/wifi_link.cpp/.h` | Wi-Fi(STA / WPA2-PSK)接続。複数候補から、スキャン結果を見て選んで接続する。タイムアウトと再接続上限つき |
+| `main/main.cpp` | `app_main()`。IO拡張→LCD→フォント初期化 → ブートメッセージ → バックライト点灯 → **繋がるまでWi-Fi接続を繰り返す** → 定期GET → 再描画 |
+| `main/wifi_link.cpp/.h` | Wi-Fi(STA / WPA2-PSK)接続。`wifiLinkBegin()`が初期化、`wifiLinkConnectRound()`がスキャン+候補1巡。**繰り返すのは呼び出し側(`main.cpp`)。切断後の再接続は無制限** |
 | `main/http_client.cpp/.h` | `esp_http_client`でHTTPS GET。`esp_crt_bundle`で証明書検証。リダイレクトは追わない |
 | `main/json_parser.cpp/.h` | cJSONでレスポンスを`Event`へ変換。**実スキーマ未確定のため候補表で複数の形を受ける** |
 | `main/secrets.h` | SSID/パスワード/URL/ポーリング間隔。**git追跡外**。雛形は`secrets.h.example` |
-| `main/serial_link.cpp/.h` | UART0(115200bps)の行単位送受信。Arduinoの`Serial`を置き換えた層(フォールバック) |
-| `main/protocol.cpp/.h` | PC↔デバイス間のテキストプロトコル解釈。**トランスポート非依存の純粋な解析**に保つ(フォールバック) |
 | `main/schedule.cpp/.h` | 予定データの保持と期間フィルタ。**外部依存の無い純粋なデータ構造**に寄せる |
 | `main/display.cpp/.h` | LovyanGFXによるLCD描画(タイムラインUI)。スプライトへ描いてフレームバッファへ転送 |
 | `main/lcd_panel.cpp/.h` | `esp_lcd`のRGBパネル初期化と、LovyanGFXの`LGFX_Device`ラッパー |
@@ -41,7 +40,6 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
 | `main/idf_component.yml` | ESPコンポーネントレジストリ/gitからの依存(LovyanGFX、`espressif/freetype`) |
 | `sdkconfig.defaults` | Kconfigの初期値。**恒久的な設定変更はここに書く**(`sdkconfig`は生成物で追跡しない) |
 | `partitions.csv` | パーティションテーブル(16MBフラッシュ / factory 6MB / `font`パーティション2MB / OTA無し) |
-| `pc_python/scheduler_sender.py` | PC側。Outlook予定取得 → シリアル送信 |
 | `.devcontainer/win-agent.bat` | **Windows側の起動口。** `win-agent.ps1`を起動し直し続けるループ |
 | `.devcontainer/win-agent.ps1` | Windows側で動く実行スクリプト。`sync` / `ports` / `probe` / `flash` / `monitor`の5操作だけを実行し、**任意のコマンドは実行しない**。起動のたびに自己更新する |
 | `tools/flash.sh` | **エージェントが実行する書き込みコマンド。** ビルド → ステージング → デタッチ → `win.sh sync` → `win.sh flash` → `win.sh reset` → `win.sh monitor` |
@@ -80,11 +78,17 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
    グリフのラスタライズ結果はPSRAM上に一括確保したアリーナへキャッシュする。
    **このアリーナを小さな`malloc`の集合に置き換えないこと**(ヒープが荒れる)。
    仕組みは`docs/spec.md`。
-4. **ログはUSB-Serial/JTAG(ネイティブUSB)へ出す。UART0はプロトコル専用。**
-   `sdkconfig.defaults`の`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`。
-   **副コンソール(`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`)へ戻さないこと。**
-   USB-Serial/JTAGはホストが接続してからしか初期化されず、書き込み後に監視を開いても
-   無音になり、実機のログが一切取れなくなる。
+4. **ログは出さない。`ESP_LOG*`も`printf`も足さないこと。**
+   運用中は壁掛けでPCへ繋がないため、出力先が無く誰も読まない。アプリのログは撤去済みで、
+   ESP-IDF内部とブートローダの出力も`sdkconfig.defaults`の
+   `CONFIG_LOG_DEFAULT_LEVEL_NONE` / `CONFIG_BOOTLOADER_LOG_LEVEL_NONE`で止めてある。
+   **`logs/monitor.log`が無音なのは正常。** 残るのはROMのブートログ(eFuseでしか
+   止められない)と、パニック時の`Guru Meditation` / `Backtrace:`だけ。
+   - コンソールの口自体はUSB-Serial/JTAG(ネイティブUSB)側に残してある
+     (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`)。切り分けでログを戻したときの出力先。
+   - **副コンソール(`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`)へ戻さないこと。**
+     USB-Serial/JTAGはホストが接続してからしか初期化されず、戻すと書き込み後に
+     監視を開いても無音になり、ログを復活させても取れなくなる。
 5. **描画はPSRAM上のスプライトへ行い、完成後にフレームバッファへ転送する。**
    **スプライトはパネルと同じ生の向き(1024x600)で確保し、回転はスプライト側に持たせる。
    `LGFX_Device`は回転なし(0)のまま使う。** 向きが食い違うと`pushSprite()`が
@@ -142,7 +146,14 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
     **`0x38`に応答するデバイスは存在しない。** CH422Gのコマンド体系(アドレスごとに
     1バイト)で書いていた時期があり、バックライトの消灯が一切効かなかった。
     書き込みが効いているかは`0x04`の読み戻しで確認できる(書いた値がそのまま返る)。
-    **PWM調光ができる**(`0x05`へ0〜255。上限は公式デモとESPHomeに合わせて247=97%)。
+    **バックライトのON/OFF(`0x03`のbit2)と輝度(`0x05`のPWM、上限247=97%)は
+    別の操作として分け、互いに触らせないこと。** Waveshare公式サンプルも分かれている。
+    **消灯から復帰するとき、IO2をHighに戻した後にPWM(`0x05`)を書いてはならない。**
+    書くとバックライトが戻らない(2026-09-14に実機で確認)。**この失敗はI2Cの戻り値では
+    検出できない。** `0x03`も`0x05`も`ESP_OK`を返すのにバックライトだけが点かないため、
+    書き込みの成否から「点いた」と判断するコードは実態と食い違いうる。CH32V003の
+    ファームウェアのソースは公開されておらず、IO2のGPIO出力とPWM出力が内部で
+    排他かどうかは判定できない。**実測に基づく制約で、理由は解明していない。**
 
 16. **タッチはGT911を`espressif/esp_lcd_touch_gt911`で読む。LovyanGFXのタッチ層
     (`Touch_GT911`)は使わない。** GT911はIO拡張チップ(CH32V003)と同じI2Cバス
@@ -166,3 +177,35 @@ USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)�
     順序違反としてビルドエラーになる。`main/touch.cpp`ではメンバへ個別代入している。
     座標(`esp_lcd_touch_get_data()`)は取得できるが使わない。タップ/ロングタップの
     判定仕様(1500ms、誤動作対策)は`docs/spec.md`。
+17. **Wi-Fiは繋がるまで諦めない。回数上限やフォールバック経路を足さないこと。**
+    RTCを搭載しておらず時刻はサーバ応答からしか得られないため、未接続のままでは
+    タイムラインを描けない。したがって「接続を諦めて別のことをする」選択肢が無い。
+    - 起動時: `wifiLinkConnectRound()`(スキャン+候補1巡)が失敗したら5秒待って
+      繰り返す。**繰り返しは`main.cpp`側のループで行い、`wifi_link.cpp`の中で
+      無限ループを回さないこと**(内部で固めるとタッチも画面更新も止まる)。
+      **`wifiLinkConnectRound()`は巡回の冒頭で`wifiLinkIsConnected()`を見て
+      即trueを返す。** 候補のタイムアウト直後に接続が成立していることがあり、
+      これを見ずに`tryCandidate()`の`esp_wifi_disconnect()`へ進むと、繋がった
+      接続を自分から叩き落として永久に繋がらなくなる不具合があった。
+    - 接続確立後の切断: 同じAPへ無制限に再接続する(別候補へは切り替えない)。
+      再接続は約2.4秒間隔で起きるが、**ログは出さない**(決定事項4)。
+    - 初回描画前のブートメッセージは、原因が分かるように出し分ける
+      (`Wi-Fi接続中...` / `スケジュール取得中...` / `取得失敗 / 再試行中` /
+      `Wi-Fi再接続中...`)。**「取得失敗」だけを出すと、原因がWi-Fiなのか
+      サーバなのか切り分けられなくなる**(実際に切り分けで時間を浪費した)。
+      **ログを出さない方針(決定事項4)のため、Wi-Fi接続待ち・再接続中の
+      ブートメッセージには試したSSID・直前のスキャンでの検出有無・
+      `WIFI_EVENT_STA_DISCONNECTED`の切断理由コード(`reason`)とその短い説明
+      (`wifiLinkDescribeReason()`)を続けて表示する。** PCを繋がずに実機の
+      画面だけで原因を切り分けられるようにするための対応で、
+      `wifiLinkGetLastAttempt()`が保持する`WifiAttemptInfo`を
+      `main.cpp`の`buildWifiStatusMessage()`が組み立てる。
+    - **同じブートメッセージにSTAのMACアドレスも常に出す。** APが端末のMAC登録を
+      要求するネットワークがあり(社内の`PLNV_COA`は端末登録制で、未登録のうちは
+      繋がらない)、登録申請に必要な値を画面だけで読み取れるようにするため。
+      `esp_read_mac(ESP_MAC_WIFI_STA)`でeFuseから読むので、Wi-Fiの起動状態や
+      接続の成否に依存しない。実機のMACは`bash tools/win.sh probe port=...`の
+      `esptool chip_id`でも読める(ベースMAC = STAのMAC)。
+    - ブートメッセージは**1行目が46px、2行目以降が28px**
+      (`Display::FS_BOOT` / `FS_BOOT_SUB`)。補足情報が増えて行数が伸びたため、
+      2行目以降を小さくしないと600x1024の画面に収まらない。

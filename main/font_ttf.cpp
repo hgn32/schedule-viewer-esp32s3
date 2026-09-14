@@ -6,13 +6,10 @@
 #include <vector>
 
 #include "esp_heap_caps.h"
-#include "esp_log.h"
 #include "esp_partition.h"
 
 #include "ft2build.h"
 #include FT_FREETYPE_H
-
-static const char* TAG = "font";
 
 // フラッシュ上のfontパーティション(生のTTF、partitions.csvを参照)のラベル。
 static const char* FONT_PARTITION_LABEL = "font";
@@ -68,7 +65,6 @@ static bool setPixelSize(int px) {
 
     FT_Error err = FT_Set_Pixel_Sizes(s_face, 0, (FT_UInt)px);
     if (err != 0) {
-        ESP_LOGW(TAG, "FT_Set_Pixel_Sizesが失敗: px=%d err=%d", px, (int)err);
         return false;
     }
     s_px = px;
@@ -126,9 +122,7 @@ static uint8_t* ensureGlyphCacheArena() {
     s_glyph_cache_arena = (uint8_t*)heap_caps_malloc(
         GLYPH_CACHE_ARENA_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_glyph_cache_arena == nullptr) {
-        ESP_LOGW(TAG, "グリフキャッシュ用アリーナ(%u bytes)の確保に失敗、"
-                      "キャッシュ無しで動作する",
-                 (unsigned)GLYPH_CACHE_ARENA_SIZE);
+        // 確保に失敗したらキャッシュ無しで動作する(以後も再試行しない)。
         s_glyph_cache_arena_failed = true;
         return nullptr;
     }
@@ -150,8 +144,6 @@ static void cacheGenericGlyph(uint32_t code, int px, const FT_GlyphSlot slot) {
 
     if (s_glyph_cache_arena_used + need > GLYPH_CACHE_ARENA_SIZE) {
         // 満杯。凝ったLRUは入れず、キャッシュ全体を捨てて先頭から作り直す。
-        ESP_LOGW(TAG, "グリフキャッシュのアリーナが満杯(%u件を破棄して作り直す)",
-                 (unsigned)s_glyph_cache.size());
         s_glyph_cache.clear();
         s_glyph_cache_arena_used = 0;
     }
@@ -180,20 +172,17 @@ esp_err_t fontTtfInit() {
     const esp_partition_t* part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, FONT_PARTITION_SUBTYPE, FONT_PARTITION_LABEL);
     if (part == nullptr) {
-        ESP_LOGE(TAG, "fontパーティションが見つからない");
         return ESP_ERR_NOT_FOUND;
     }
 
     esp_err_t merr = esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA,
                                         &s_mmap_ptr, &s_mmap_handle);
     if (merr != ESP_OK) {
-        ESP_LOGE(TAG, "fontパーティションのmmapに失敗: %s", esp_err_to_name(merr));
         return ESP_FAIL;
     }
 
     FT_Error err = FT_Init_FreeType(&s_library);
     if (err != 0) {
-        ESP_LOGE(TAG, "FreeTypeの初期化に失敗: err=%d", (int)err);
         s_library = nullptr;
         return ESP_FAIL;
     }
@@ -201,18 +190,12 @@ esp_err_t fontTtfInit() {
     err = FT_New_Memory_Face(s_library, (const FT_Byte*)s_mmap_ptr, (FT_Long)part->size,
                              0, &s_face);
     if (err != 0) {
-        ESP_LOGE(TAG, "TTFを開けない(fontパーティション、%lu bytes、err=%d)",
-                 (unsigned long)part->size, (int)err);
         FT_Done_FreeType(s_library);
         s_library = nullptr;
         s_face    = nullptr;
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "TTFを読み込んだ(fontパーティション、family=%s style=%s glyphs=%ld)",
-             s_face->family_name ? s_face->family_name : "?",
-             s_face->style_name ? s_face->style_name : "?",
-             (long)s_face->num_glyphs);
     return ESP_OK;
 }
 
@@ -304,8 +287,7 @@ static uint16_t* ensureGlyphBuf(size_t px) {
                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (buf == nullptr) {
-        ESP_LOGW(TAG, "グリフバッファの確保に失敗(%u px)、drawPixel()経路へ切り替える",
-                 (unsigned)px);
+        // 確保に失敗した場合はdrawPixel()経路へ切り替える(呼び出し側の分岐)。
         return nullptr;
     }
 
@@ -494,7 +476,6 @@ esp_err_t fontTtfCacheGlyphs(const char* chars, int px) {
         s_cache.push_back(std::move(g));
     }
 
-    ESP_LOGI(TAG, "グリフキャッシュを作成した(%d文字、%dpx)", (int)s_cache.size(), px);
     return ESP_OK;
 }
 

@@ -9,7 +9,9 @@ LCDに、Outlook予定表を12時間分のタイムライン表示するビュ�
 > 使わない構成でしたが、サーバから直接取得する方式へ移行しました。現在はWi-Fi(STA)と
 > HTTPSを使用します。Bluetoothは引き続き使用しません。
 > USBシリアル経由の受信経路(`serial_link` / `protocol` / `pc_python`)は、サーバ到達性が
-> 実機で確認できるまでフォールバックとして残してあります。
+> 実機で確認できたため**撤去しました**。予定の取得経路はHTTPSだけです。
+> **Wi-Fiが繋がらない場合は繋がるまで再試行し続けます**(RTC非搭載で時刻をサーバからしか
+> 得られないため、未接続では表示できるものがありません)。
 
 ## 実機イメージ
 
@@ -22,13 +24,11 @@ LCDに、Outlook予定表を12時間分のタイムライン表示するビュ�
 ```
 .
 ├── main/                    # ESP32-S3-Touch-LCD-7B ファームウェア
-│   ├── main.cpp             # app_main()、初期化→Wi-Fi接続→取得→描画のループ
-│   ├── wifi_link.cpp/.h     # Wi-Fi(STA / WPA2-PSK)接続
+│   ├── main.cpp             # app_main()、初期化→Wi-Fi接続(繋がるまで再試行)→取得→描画のループ
+│   ├── wifi_link.cpp/.h     # Wi-Fi(STA / WPA2-PSK)接続。切断後の再接続は無制限
 │   ├── http_client.cpp/.h   # HTTPS GET(esp_http_client + esp_crt_bundle)
 │   ├── json_parser.cpp/.h   # cJSONでレスポンスをEventへ変換
 │   ├── secrets.h.example    # SSID/パスワード/URLの雛形(実体secrets.hは追跡外)
-│   ├── serial_link.cpp/.h   # UART0(115200bps)の行単位送受信 ※フォールバック
-│   ├── protocol.cpp/.h      # PC↔デバイス間のテキストプロトコル ※フォールバック
 │   ├── schedule.cpp/.h      # 予定データの保持
 │   ├── display.cpp/.h       # LCD描画(タイムラインUI)。スプライトへ描いてフレームバッファへ転送
 │   ├── lcd_panel.cpp/.h     # esp_lcd RGBパネル初期化 + LovyanGFXのLGFX_Deviceラッパー
@@ -40,9 +40,7 @@ LCDに、Outlook予定表を12時間分のタイムライン表示するビュ�
 │   └── idf_component.yml    # LovyanGFX(git依存)、espressif/freetype への依存
 ├── fonts/                   # fontパーティションへ書き込むTTF(MPLUS1-Medium.ttf)とOFL.txt
 ├── docs/
-│   └── spec.md              # 仕様(画面、表示条件、プロトコル、時刻)
-├── pc_python/
-│   └── scheduler_sender.py  # Outlook予定取得 → シリアル送信
+│   └── spec.md              # 仕様(画面、表示条件、時刻)
 ├── .devcontainer/           # ESP-IDF v5.5 の開発コンテナ
 ├── CMakeLists.txt           # ESP-IDFプロジェクトのルート
 ├── partitions.csv           # パーティションテーブル(16MB / factory 6MB / fontパーティション2MB)
@@ -208,6 +206,22 @@ bash tools/flash.sh --no-build      # ビルド済みの成果物で書き込む
 bash tools/flash.sh --port COM12 --baud 460800 --monitor 0
 ```
 
+COMポートの既定値は`tools/flash.sh`の`PORT`に書いてあります(2026-09-14時点でCOM21)。
+**挿し直しやPC構成の変更で番号は変わります。** 書き込みが失敗したら
+`bash tools/win.sh ports`で`VID:PID=303A:1001`のポートを確認し、`--port`で渡すか
+`PORT`を書き換えてください。
+
+同じ操作はVSCodeのタスク(`ターミナル > タスクの実行`、`.vscode/tasks.json`)からも
+実行できます。中身は上と同じ`tools/flash.sh`です。
+
+| タスク | 内容 |
+|---|---|
+| ビルド | `idf.py build`(既定のビルドタスク。`Ctrl+Shift+B`) |
+| ビルドして書き込み | `tools/flash.sh --monitor 60` |
+| 書き込みのみ | `tools/flash.sh --no-build --monitor 60` |
+| ログ監視(180秒) | `tools/win.sh monitor` |
+| COMポート一覧 | `tools/win.sh ports` |
+
 個別の操作は`tools/win.sh`で直接呼べます。
 
 | コマンド | Windows側で実行される内容 |
@@ -257,6 +271,12 @@ site-packages・レジストリ・`PATH`・ドライバには一切触れませ�
 | `logs/flash.log` | esptoolの出力。末尾に必ず`=== FLASH RESULT rc=<終了コード> ===` |
 | `logs/monitor.log` | シリアルログ。`=== MONITOR START/END ===`で区切られる |
 | `logs/win.log` | PowerShellのtranscript(冗長な控え。終了時にコピー) |
+
+> **`logs/monitor.log`はほぼ無音なのが正常です。** デバイスはログを出しません
+> (アプリの`ESP_LOG*`は撤去済み、ESP-IDF内部とブートローダの出力も
+> `sdkconfig.defaults`で停止)。出るのはeFuseでしか止められないROMのブートログと、
+> パニック時の`Guru Meditation` / `Backtrace:`だけです。詳細は
+> [docs/spec.md](docs/spec.md)の「ログ」節を参照してください。
 
 `logs/`はgit追跡外です。sshが切れた間の行はWindows側の控えに退避し、再接続時に
 `=== RESYNC ===`を付けて送り直します(重複は許容、欠落は許容しない方針)。
@@ -466,52 +486,3 @@ attachが成功しているため、通常この経路は不要です。動か�
 ホストLinuxのsshdへ変え、ホストLinuxのターミナルで
 `USBIP_ALLOW_HOST=1 .devcontainer/usb-attach.sh attach 127.0.0.1 <BUSID>`を実行します。
 生えた`/dev/ttyUSB0`は`/dev`バインドマウントでコンテナからも見えます。
-
-## PC側(Python) スクリプト
-
-`pc_python/scheduler_sender.py`
-
-### 必要環境
-
-- Python 3
-- `pywin32`(Outlook COM操作)
-- `pyserial`(シリアル通信)
-
-```sh
-pip install pywin32 pyserial
-```
-
-### 設定ファイル
-
-実行ディレクトリに以下を配置する。
-
-`config.json`:
-```json
-{
-  "com_port": "COM3"
-}
-```
-
-- `com_port` に `"FILE"` を指定すると、シリアルの代わりに `output.txt` へ送信内容を書き出す(デバッグ用)。
-
-`filter_words.txt`(任意):
-```
-正規表現パターン=置換後文字列
-```
-
-予定タイトル・場所のテキストに対して、行ごとに `正規表現=置換文字列` の形式で置換ルールを適用できる。
-
-### 実行
-
-```sh
-python pc_python/scheduler_sender.py
-```
-
-- 起動時にシリアルポートを監視するスレッドを開始し、デバイスから `REQ:ALL` を受信すると即座に予定を送信
-- それとは別に10分おきの定時送信も行う
-- 当日 0:00〜24:00 の予定のうち、`BusyStatus` が「仮の予定」「空き」以外のものを送信対象とする
-
-### 注意: タイムゾーンの扱い
-
-OutlookのCOMが返す `item.Start` / `item.End` はJSTの時刻をそのままUTCとしてタグ付けした値になっているため、
-`.timestamp()` の結果は真のUTCより9時間進んでいる。送信前に9時間(`9 * 3600`秒)を引いて真のUTC epochに補正している。

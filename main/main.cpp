@@ -1,11 +1,9 @@
 #include <stdlib.h>   // setenv (POSIX)
-
-#include <string>
+#include <cstring>    // strcmp
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_log.h"
 #include "esp_timer.h"
 
 #include "display.h"
@@ -13,15 +11,11 @@
 #include "io_ext.h"
 #include "json_parser.h"
 #include "lcd_panel.h"
-#include "protocol.h"
 #include "schedule.h"
 #include "secrets.h"
-#include "serial_link.h"
 #include "time_util.h"
 #include "touch.h"
 #include "wifi_link.h"
-
-static const char* TAG = "main";
 
 // Wi-Fi接続を待つ上限。接続確立後、切断からの再接続を待つ側で使う。
 // 社内APは認証に時間がかかることがあるので長めに取る。
@@ -32,8 +26,10 @@ static const uint32_t WIFI_CANDIDATE_TIMEOUT_MS = 15000;
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 // 取得に失敗したときの再試行間隔。POLL_INTERVAL_SEC(既定300)より短くする。
 static const uint32_t RETRY_INTERVAL_SEC = 60;
-// メインループの1ティック(シリアル受信待ちのタイムアウト)。
+// メインループの1ティック(タッチ・時計・再描画をポーリングする周期)。
 static const uint32_t LOOP_TICK_MS = 100;
+// Wi-Fi候補が全滅したときの再スキャンまでの待ち時間。
+static const uint32_t WIFI_RESCAN_WAIT_MS = 5000;
 // 起動後、表示ができてから点灯するバックライトの輝度(%)。
 static const uint8_t BACKLIGHT_PERCENT = 80;
 // タイムライン全体の再描画は重いので、分の変わり目(秒=0)を避けてこの秒へずらす。
@@ -41,6 +37,39 @@ static const uint8_t BACKLIGHT_PERCENT = 80;
 static const int TIMELINE_REDRAW_SEC = 5;
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Wi-Fi未接続時のブートメッセージを組み立てる。PCを繋がずに原因を切り分けられるよう、
+// 試したSSID・スキャンでの検出有無・直近の切断理由・自分のMACを画面へ出す。
+// MACを出すのは、APが端末のMAC登録を要求するネットワークで、画面を見るだけで
+// 登録申請に必要な値が分かるようにするため。
+// 1行目だけが大きく描かれ、2行目以降は小さく描かれる(Display::showBootMessage())。
+static void buildWifiStatusMessage(const char* head, char* buf, size_t len) {
+    if (head == nullptr || buf == nullptr || len == 0) return;
+
+    WifiAttemptInfo info = {};
+    wifiLinkGetLastAttempt(&info);
+
+    char mac[24] = {};
+    wifiLinkGetMac(mac, sizeof(mac));
+
+    if (info.ssid[0] == '\0') {
+        // まだ1度も試していない(起動直後の最初のスキャン中など)。
+        snprintf(buf, len, "%s\nMAC %s", head, mac);
+        return;
+    }
+
+    if (info.reason == 0) {
+        // 切断イベントがまだ無い=接続応答そのものが無い状態。
+        snprintf(buf, len, "%s\n%s\n%s AP%u件\n理由:なし\nMAC %s", head, info.ssid,
+                 info.scanned ? "スキャン:検出" : "スキャン:未検出", (unsigned)info.ap_count,
+                 mac);
+        return;
+    }
+
+    snprintf(buf, len, "%s\n%s\n%s AP%u件\n理由%u\n%s\nMAC %s", head, info.ssid,
+             info.scanned ? "スキャン:検出" : "スキャン:未検出", (unsigned)info.ap_count,
+             (unsigned)info.reason, wifiLinkDescribeReason(info.reason), mac);
+}
 
 // 次の取得時刻を壁時計の境界に合わせる。POLL_INTERVAL_SEC=300なら
 // X:00 / X:05 / X:10…になる。旧版ではPC側(scheduler_sender.py)が
@@ -56,7 +85,6 @@ static bool fetchSchedule(ScheduleStore* store) {
     if (store == nullptr) return false;
 
     if (!wifiLinkIsConnected() && !wifiLinkWaitConnected(WIFI_TIMEOUT_MS)) {
-        ESP_LOGW(TAG, "Wi-Fi未接続のため取得を見送る");
         return false;
     }
 
@@ -67,12 +95,9 @@ static bool fetchSchedule(ScheduleStore* store) {
     if (res.status >= 300 && res.status < 400) {
         // Entra IDのログインへ飛ばされる場合はここに来る。
         // デバイス側では対話的なOAuth2を通せないので、サーバ側の設定変更が要る。
-        ESP_LOGE(TAG, "HTTP %d: 認証リダイレクトの可能性がある。Location=%s",
-                 res.status, res.location.c_str());
         return false;
     }
     if (res.status != 200) {
-        ESP_LOGE(TAG, "HTTP %d", res.status);
         return false;
     }
 
@@ -94,41 +119,31 @@ extern "C" void app_main(void) {
     setenv("TZ", "UTC0", 1);
     tzset();
 
-    // IOエキスパンダ(バックライト/リセット)。無くても表示自体は続けられるので
-    // 失敗してもログだけ出して続行する(バックライトが点かないだけになる)。
-    if (ioExtBegin() != ESP_OK) {
-        ESP_LOGE(TAG, "[IO] IOエキスパンダの初期化に失敗した(続行する)");
-    }
+    // IOエキスパンダ(バックライト/リセット)。無くても表示自体は続けられるので、
+    // 失敗しても続行する(バックライトが点かないだけになる)。
+    (void)ioExtBegin();
 
-    // タッチ(GT911)。無くても表示自体は続けられるので、失敗してもログだけ出して
-    // 続行する(画面のON/OFF操作ができなくなるだけ)。IOエキスパンダと同じI2Cバスを
+    // タッチ(GT911)。無くても表示自体は続けられるので、失敗しても続行する
+    // (画面のON/OFF操作ができなくなるだけ)。IOエキスパンダと同じI2Cバスを
     // 共有するため、ioExtBegin()より後に呼ぶ必要がある。
-    if (!touchBegin()) {
-        ESP_LOGW(TAG, "[TOUCH] タッチの初期化に失敗した(続行する)");
-    }
+    (void)touchBegin();
 
     // LCDパネルは表示の前提そのものなので、失敗したら止める。
-    // オンチップデバッグが無い基板なので、ここで停止してログだけを頼りに切り分ける。
     if (lcdPanelBegin() != ESP_OK) {
-        ESP_LOGE(TAG, "[LCD] LCDパネルの初期化に失敗したため停止する");
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
-    serialLinkBegin();
-
     // app_main()のスタック上に置かず、関数ローカルstaticにしている
     // (巨大なスプライトや予定配列をこの後も生かし続けるため)。
     static ScheduleStore store;
-    static Protocol      proto(&store);
     static Display       display;
 
     // フラッシュのfontパーティションが用意できないときは続行しない。
     // 内蔵フォントは輪郭が粗く予定を読み取れないため、動いているように
     // 見せるほうが害になる。
     if (!display.begin()) {
-        ESP_LOGE(TAG, "[FONT] フォントを用意できないため停止する");
         display.showFatalMessage("フォント読込失敗\nfontパーティションに\nTTFを書き込んでください");
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -138,9 +153,10 @@ extern "C" void app_main(void) {
     display.showBootMessage("Wi-Fi接続中...");
 
     // 表示ができてから点灯する(初期化中の乱れた画面を見せないため)。
-    if (ioExtSetBacklight(BACKLIGHT_PERCENT) != ESP_OK) {
-        ESP_LOGW(TAG, "[IO] バックライトの点灯に失敗した");
-    }
+    // 公式サンプルの初期化順序(bl_on()の後にPWM輝度を設定)と同じく、
+    // イネーブルと輝度設定を分けて呼ぶ。
+    (void)ioExtBacklightEnable(true);
+    (void)ioExtSetBacklightLevel(BACKLIGHT_PERCENT);
 
     // secrets.hでWIFI_STATIC_IP(候補2・候補3は_2/_3付き)を定義したときだけ、
     // その候補は固定IPで接続する。未定義ならDHCPのまま(nullptrを渡す)。
@@ -200,23 +216,33 @@ extern "C" void app_main(void) {
 
     esp_err_t werr = wifiLinkBegin(candidates, candidate_count, WIFI_CANDIDATE_TIMEOUT_MS);
     if (werr != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi接続に失敗した: %s", esp_err_to_name(werr));
-        display.showBootMessage("Wi-Fi接続失敗\nシリアル待機中");
-    } else {
-        char ip[16];
-        char ssid[33];
-        wifiLinkGetIp(ip, sizeof(ip));
-        wifiLinkGetSsid(ssid, sizeof(ssid));
-        ESP_LOGI(TAG, "Wi-Fi接続完了 SSID=%s IP=%s", ssid, ip);
-
-        display.showBootMessage("スケジュール取得中...");
+        // ここは初期化そのものの失敗。再試行しても直らないので停止する。
+        display.showFatalMessage("Wi-Fi初期化失敗");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 
-    // 初回は接続の成否にかかわらず1度試す(失敗ならシリアル待機に落ちる)。
+    // 繋がるまで諦めない。RTCが無く時刻はサーバからしか得られないため、
+    // Wi-Fiが繋がらない限り表示できるものが無い。
+    // showBootMessage()は全画面を描き直すので、前回と同じ文字列なら描き直さない。
+    static char boot_wifi_msg[192]     = {};
+    static char boot_wifi_msg_prev[192] = {};
+    while (!wifiLinkConnectRound()) {
+        buildWifiStatusMessage("Wi-Fi接続中...", boot_wifi_msg, sizeof(boot_wifi_msg));
+        if (strcmp(boot_wifi_msg, boot_wifi_msg_prev) != 0) {
+            display.showBootMessage(boot_wifi_msg);
+            snprintf(boot_wifi_msg_prev, sizeof(boot_wifi_msg_prev), "%s", boot_wifi_msg);
+        }
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RESCAN_WAIT_MS));
+    }
+
+    display.showBootMessage("スケジュール取得中...");
+
     bool     rendered       = false;
     uint32_t next_fetch_utc = 0;
     int      last_minute    = -1;
-    // 取得やシリアル受信でタイムラインの再描画が必要になったことを示すフラグ。
+    // 取得でタイムラインの再描画が必要になったことを示すフラグ。
     // 00秒に重い全画面再描画が集中しないよう、実際の再描画はTIMELINE_REDRAW_SECまで遅らせる。
     bool     timeline_dirty = false;
     // 画面ON/OFFの現在状態。バックライトの実際の状態と一致させる。
@@ -227,11 +253,6 @@ extern "C" void app_main(void) {
     // falseへ戻すので、次のタッチでは通常どおりLongTapが効く。
     bool     suppress_longtap = false;
 
-    // サーバ経路が使えないときの保険として、PC(scheduler_sender.py)からの
-    // シリアル受信も残してある。到達性が確認できたら撤去してよい。
-    serialLinkWriteLine("REQ:ALL");
-
-    std::string line;
     for (;;) {
         // タッチによる画面ON/OFF。取得・描画より前に処理してよい(軽い処理のため)。
         TouchEvent touch_ev = touchPoll();
@@ -239,11 +260,11 @@ extern "C" void app_main(void) {
             // 新しいタッチの開始。前のタッチの抑制状態を引きずらない。
             suppress_longtap = false;
             if (!screen_on) {
-                if (ioExtSetBacklight(BACKLIGHT_PERCENT) == ESP_OK) {
+                // 公式のbl_on()と同一にするため、ここではPWM(0x05)を書かない。
+                // 消灯時にもPWMレジスタには触れていないので、起動時に設定した
+                // 輝度がそのまま残っている想定。
+                if (ioExtBacklightEnable(true) == ESP_OK) {
                     screen_on = true;
-                    ESP_LOGI(TAG, "[TOUCH] タップで画面を点灯した");
-                } else {
-                    ESP_LOGW(TAG, "[TOUCH] 画面の点灯に失敗した");
                 }
                 // このタッチ自身の長押しが、点灯直後にそのままロングタップと
                 // 判定されて即座に消灯してしまわないよう抑制する。
@@ -251,11 +272,10 @@ extern "C" void app_main(void) {
             }
         } else if (touch_ev == TouchEvent::LongTap) {
             if (screen_on && !suppress_longtap) {
-                if (ioExtSetBacklight(0) == ESP_OK) {
+                // 消灯もDISP(IO2)のイネーブルだけを落とす。公式のbl_off()と同じ操作で、
+                // PWM(0x05)には触らない。
+                if (ioExtBacklightEnable(false) == ESP_OK) {
                     screen_on = false;
-                    ESP_LOGI(TAG, "[TOUCH] ロングタップで画面を消灯した");
-                } else {
-                    ESP_LOGW(TAG, "[TOUCH] 画面の消灯に失敗した");
                 }
             }
         }
@@ -279,7 +299,18 @@ extern "C" void app_main(void) {
                 // 一時的なAP不在で画面が長時間止まる。短い間隔で作り直す。
                 // ここは境界に合わせない(合わせると次の境界まで待つことになる)。
                 next_fetch_utc = nowUtc() + RETRY_INTERVAL_SEC;
-                if (!rendered) display.showBootMessage("取得失敗\n再試行中");
+                if (!rendered) {
+                    // 原因が分かる表示にする。Wi-Fiが切れているのに「取得失敗」とだけ
+                    // 出すと切り分けできない。
+                    if (wifiLinkIsConnected()) {
+                        display.showBootMessage("取得失敗\n再試行中");
+                    } else {
+                        char reconnect_msg[192];
+                        buildWifiStatusMessage("Wi-Fi再接続中...", reconnect_msg,
+                                                sizeof(reconnect_msg));
+                        display.showBootMessage(reconnect_msg);
+                    }
+                }
             }
         }
 
@@ -302,30 +333,7 @@ extern "C" void app_main(void) {
             display.tickBlink(now, (uint32_t)(esp_timer_get_time() / 1000));
         }
 
-        // LOOP_TICK_MS待って行が来なければfalse。ここがループの唯一の待ち。
-        if (!serialLinkReadLine(line, LOOP_TICK_MS)) continue;
-        if (line.empty()) continue;
-
-        proto.processLine(line);
-
-        if (proto.isComplete()) {
-            proto.resetComplete();
-
-            uint32_t recv_time = proto.getReceivedTime();
-            if (recv_time > 0) {
-                setSystemTime(recv_time);
-            }
-
-            if (!rendered) {
-                // 起動メッセージからの初回描画だけは即時に行う(起動直後に
-                // 数秒待たせないため)。
-                display.renderTimeline(store, nowUtc());
-                last_minute = (int)(nowUtc() / 60);
-                rendered    = true;
-            } else {
-                // 2回目以降はTIMELINE_REDRAW_SECまで遅らせ、00秒への集中を避ける。
-                timeline_dirty = true;
-            }
-        }
+        // ループの唯一の待ち。これが無いとビジーループになりウォッチドッグが落ちる。
+        vTaskDelay(pdMS_TO_TICKS(LOOP_TICK_MS));
     }
 }

@@ -122,10 +122,22 @@ private:
 
     // 各書体の実効ピクセル高さ(レイアウト計算用)。
     static const int FS_BOOT   = 46;
+    // ブートメッセージの2行目以降(SSID・MAC・切断理由などの補足)。
+    // 1行目と同じ46pxだと行数が増えたときに画面へ収まらないため小さくする。
+    static const int FS_BOOT_SUB = 28;
     static const int FS_HEADER = 34;
     static const int FS_TICK   = 20;
     static const int FS_CLOCK  = 56;
     static const int FS_EVENT  = 14;
+
+    // 予定枠内の文字配置(ベースライン指定用)。hheaのascender(FS_EVENT=14pxで17px)は
+    // 実インク上端(12px)より5px下にベースラインを置くため、top_left指定のままだと
+    // 30分枠で2行目(場所)が下辺で切れる。インク上端・下端の実測値をもとに
+    // ベースライン位置を直接指定するための定数。フォントを差し替えたら実測し直すこと。
+    static const int EVENT_PAD_TOP    = 2;  // 枠上端から件名のインク上端までの余白
+    static const int EVENT_INK_ASC    = 12; // FS_EVENT(14px)でのインク上端(M PLUS 1 Mediumの実測値)
+    static const int EVENT_INK_DESC   = 4;  // 同じくインク下端(「g」の下ばみ)
+    static const int EVENT_LINE_PITCH = 16; // 件名と場所のベースライン間隔
 
     // 点滅の総時間と半周期。半周期ごとにフェーズを反転する。
     static const uint32_t BLINK_DURATION_MS    = 5000;

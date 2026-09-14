@@ -4,12 +4,9 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
-#include "esp_log.h"
 #include "esp_timer.h"
 
 #include "io_ext.h"
-
-static const char* TAG = "touch";
 
 // パネルの生の向き(1024x600)での最大値。座標そのものは使わないが、
 // esp_lcd_touch_config_tの初期化には必要。
@@ -34,7 +31,7 @@ bool touchBegin() {
 
     i2c_master_bus_handle_t bus = ioExtGetBus();
     if (bus == nullptr) {
-        ESP_LOGE(TAG, "I2Cバス未初期化(ioExtBegin()より先に呼ばれた可能性がある)");
+        // ioExtBegin()より先に呼ばれた場合はI2Cバスが未初期化。
         return false;
     }
 
@@ -53,7 +50,6 @@ bool touchBegin() {
     esp_lcd_panel_io_handle_t     io_handle = nullptr;
     esp_err_t err = esp_lcd_new_panel_io_i2c(bus, &io_config, &io_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "パネルIO(I2C)の作成に失敗: %s", esp_err_to_name(err));
         return false;
     }
 
@@ -65,12 +61,10 @@ bool touchBegin() {
 
     err = esp_lcd_touch_new_i2c_gt911(io_handle, &touch_config, &s_touch);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GT911の初期化に失敗: %s", esp_err_to_name(err));
         s_touch = nullptr;
         return false;
     }
 
-    ESP_LOGI(TAG, "GT911を初期化した(I2Cアドレス0x5D)");
     return true;
 }
 

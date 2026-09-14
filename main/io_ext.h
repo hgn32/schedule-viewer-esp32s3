@@ -27,11 +27,16 @@ esp_err_t ioExtBegin();
 // begin()未実行ならESP_ERR_INVALID_STATE。
 esp_err_t ioExtSetOutput(uint8_t pin, bool level);
 
-// バックライトの輝度(0=消灯 〜 100=最大)。レジスタ0x05へPWM値を書く。
+// バックライトのイネーブル(DISP=IO2)。レジスタ0x03のbit2だけを操作する。
+// Waveshare公式サンプル(wavesahre_rgb_lcd_bl_on()/bl_off())と同じ構造で、
+// PWM(0x05)には一切触らない。begin()未実行ならESP_ERR_INVALID_STATE。
+esp_err_t ioExtBacklightEnable(bool on);
+
+// バックライトの輝度(0〜100)。レジスタ0x05へPWM値を書く。
 // **PWMは反転しており、書く値が大きいほど暗い**(0が最大輝度、255で消灯)。
-// IO2(DISP)はPWMチャンネルが握っているのでレジスタ0x03からは操作しない。
+// IO2(DISP)のON/OFFには関与しないので、ここではレジスタ0x03を触らない。
 // begin()未実行ならESP_ERR_INVALID_STATE。
-esp_err_t ioExtSetBacklight(uint8_t percent);
+esp_err_t ioExtSetBacklightLevel(uint8_t percent);
 
 // タッチIC(GT911)は同じI2Cバス(GPIO8/GPIO9)にぶら下がっているので、
 // バスを作り直さずここで確保したものを共有する。begin()未実行ならnullptrを返す。

@@ -62,7 +62,7 @@ idf.py build
 ### 4-2. テスト
 
 - 自動テストは現状このrepoに存在しない。外部依存の無い純粋なロジック
-  （`main/protocol.cpp` / `main/schedule.cpp` / `main/time_util.h`）の検証が必要になったら、
+  （`main/schedule.cpp` / `main/time_util.h`）の検証が必要になったら、
   ESP-IDFのUnityを導入することをまず提案すること。勝手に導入しない。
 
 ### 4-3. 実行時のルール

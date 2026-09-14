@@ -4,12 +4,9 @@
 #include <vector>
 
 #include "cJSON.h"
-#include "esp_log.h"
 
 #include "text_util.h"
 #include "time_util.h"
-
-static const char* TAG = "json_parser";
 
 namespace {
 
@@ -80,25 +77,19 @@ BusyState busyState(const cJSON* obj, const char* const* keys, size_t n) {
     if (cJSON_IsNumber(v)) {
         // OutlookのBusyStatus: 0=空き, 1=仮の予定, それ以外は表示対象。
         const int status = (int)v->valuedouble;
-        const char* key = v->string ? v->string : "?";
         if (status == 0) {
-            ESP_LOGI(TAG, "空きとして除外: %s=%d", key, status);
             return BusyState::Free;
         }
         if (status == 1) {
-            ESP_LOGI(TAG, "仮の予定として取り込み(明滅なし): %s=%d", key, status);
             return BusyState::Tentative;
         }
         return BusyState::Other;
     }
     if (cJSON_IsString(v) && v->valuestring != nullptr) {
-        const char* key = v->string ? v->string : "?";
         if (strcasecmp(v->valuestring, "free") == 0) {
-            ESP_LOGI(TAG, "空きとして除外: %s=%s", key, v->valuestring);
             return BusyState::Free;
         }
         if (strcasecmp(v->valuestring, "tentative") == 0) {
-            ESP_LOGI(TAG, "仮の予定として取り込み(明滅なし): %s=%s", key, v->valuestring);
             return BusyState::Tentative;
         }
         return BusyState::Other;
@@ -185,20 +176,16 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
                        uint32_t* server_now_utc) {
     if (store == nullptr) return false;
     if (body.empty()) {
-        ESP_LOGE(TAG, "本文が空");
         return false;
     }
 
     cJSON* root = cJSON_ParseWithLength(body.c_str(), body.size());
     if (root == nullptr) {
-        // 実スキーマ調査のため、先頭だけログに出す(全文はUART0を埋めるので出さない)。
-        ESP_LOGE(TAG, "JSONとして解析できない。本文の先頭: %.200s", body.c_str());
         return false;
     }
 
     const cJSON* arr = findEventArray(root);
     if (arr == nullptr) {
-        ESP_LOGE(TAG, "イベント配列が見つからない。本文の先頭: %.200s", body.c_str());
         cJSON_Delete(root);
         return false;
     }
@@ -209,7 +196,6 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
     parsed.reserve((size_t)cJSON_GetArraySize(arr));
 
     int skipped  = 0; // 構造が読めなかった件数。全件これだと解析失敗とみなす
-    int filtered = 0; // 意図して表示対象から外した件数。失敗ではない
     const cJSON* item = nullptr;
     cJSON_ArrayForEach(item, arr) {
         if (!cJSON_IsObject(item)) {
@@ -218,17 +204,14 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
         }
 
         if (isFlagSet(item, kCancelKeys, sizeof(kCancelKeys) / sizeof(kCancelKeys[0]))) {
-            filtered++;
             continue;
         }
         if (isFlagSet(item, kAllDayKeys, sizeof(kAllDayKeys) / sizeof(kAllDayKeys[0]))) {
-            filtered++;
             continue;
         }
         const BusyState busy =
             busyState(item, kBusyKeys, sizeof(kBusyKeys) / sizeof(kBusyKeys[0]));
         if (busy == BusyState::Free) {
-            filtered++;
             continue;
         }
 
@@ -269,17 +252,13 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
         // 配列が空、または全件が中止/終日で除外されただけなら成功扱いにする。
         if (skipped == 0) {
             store->clear();
-            ESP_LOGI(TAG, "表示対象の予定は0件(除外%d件)", filtered);
             return true;
         }
-        ESP_LOGE(TAG, "%d件すべて解析できなかった", skipped);
         return false;
     }
 
     store->clear();
     for (const auto& e : parsed) store->add(e);
 
-    ESP_LOGI(TAG, "%d件を取り込んだ(除外%d件 / 解析不能%d件)",
-             (int)parsed.size(), filtered, skipped);
     return true;
 }

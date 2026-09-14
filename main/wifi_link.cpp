@@ -4,20 +4,12 @@
 #include <vector>
 
 #include "esp_event.h"
-#include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "nvs_flash.h"
-
-static const char* TAG = "wifi_link";
-
-// APからの切断でどこまで粘るか。これを超えたら諦めてイベントグループへ失敗を立てる。
-// (電源投入直後にAPが見えないだけのこともあるので即座には諦めない)
-// この値は「接続確立後の運用中」にだけ使う。候補を試している最中(s_probing)は
-// 1回切断されただけで次の候補へ切り替える。
-static const int MAX_RETRY = 8;
 
 // ブロッキングスキャンで拾うAP数の上限。ヒープ確保を有限に保つための安全装置。
 static const uint16_t MAX_SCAN_APS = 20;
@@ -26,12 +18,21 @@ static const int BIT_CONNECTED = BIT0;
 static const int BIT_FAILED    = BIT1;
 
 static EventGroupHandle_t s_events     = nullptr;
-static int                s_retry      = 0;
 static bool               s_started    = false;
 static bool               s_probing    = false;  // 候補を順に試している最中か
 static esp_ip4_addr_t     s_ip         = {};
 static esp_netif_t*       s_netif      = nullptr;
 static char               s_ssid[33]   = {};      // 最後に接続確立したSSID
+
+// wifiLinkBegin()で記憶した候補。以後のwifiLinkConnectRound()すべてで使う。
+static std::vector<WifiCandidate> s_candidates;
+static uint32_t                   s_timeout_ms_each = 0;
+
+// 直近の接続試行の状況。画面へ出して原因を切り分けるためだけに保持する。
+static char     s_try_ssid[33]   = {};  // 最後に試した候補のSSID
+static bool     s_try_scanned    = false;
+static uint16_t s_scan_count     = 0;   // 直前のスキャンで見つかったAP総数
+static uint8_t  s_last_reason    = 0;   // 直近のWIFI_EVENT_STA_DISCONNECTEDのreason
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -47,30 +48,22 @@ static void onWifiEvent(void* arg, esp_event_base_t base, int32_t id, void* data
     }
 
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        // 原因の切り分けのため理由コードを保存する。画面へ出す用途。
+        if (data != nullptr) {
+            s_last_reason = ((wifi_event_sta_disconnected_t*)data)->reason;
+        }
+
         s_ip.addr = 0;
         xEventGroupClearBits(s_events, BIT_CONNECTED);
 
-        uint8_t reason = 0;
-        if (data != nullptr) {
-            reason = ((wifi_event_sta_disconnected_t*)data)->reason;
-        }
-
         if (s_probing) {
             // 候補を試している最中は再接続で粘らず、即座に次の候補へ切り替える。
-            ESP_LOGW(TAG, "APから切断された(reason=%d)。次の候補へ切り替える", reason);
             xEventGroupSetBits(s_events, BIT_FAILED);
             return;
         }
 
-        if (s_retry < MAX_RETRY) {
-            s_retry++;
-            ESP_LOGW(TAG, "APから切断された(reason=%d)。再接続する(%d/%d)", reason, s_retry,
-                     MAX_RETRY);
-            esp_wifi_connect();
-        } else {
-            ESP_LOGE(TAG, "再接続の上限(%d回)に達した", MAX_RETRY);
-            xEventGroupSetBits(s_events, BIT_FAILED);
-        }
+        // 運用中は上限を設けず、繋がるまで無制限に再接続する。
+        esp_wifi_connect();
     }
 }
 
@@ -82,8 +75,9 @@ static void onIpEvent(void* arg, esp_event_base_t base, int32_t id, void* data) 
 
     auto* event = (ip_event_got_ip_t*)data;
     s_ip        = event->ip_info.ip;
-    s_retry     = 0;
-    ESP_LOGI(TAG, "IPv4取得: " IPSTR, IP2STR(&s_ip));
+
+    // 接続できた時点で古い切断理由を残さない。
+    s_last_reason = 0;
 
     xEventGroupClearBits(s_events, BIT_FAILED);
     xEventGroupSetBits(s_events, BIT_CONNECTED);
@@ -99,7 +93,6 @@ static esp_err_t setDnsServer(esp_netif_t* netif, esp_netif_dns_type_t type, con
     esp_netif_dns_info_t dns = {};
     dns.ip.type              = ESP_IPADDR_TYPE_V4;
     if (esp_netif_str_to_ip4(addr, &dns.ip.u_addr.ip4) != ESP_OK) {
-        ESP_LOGE(TAG, "DNSアドレスの書式が不正: %s", addr);
         return ESP_ERR_INVALID_ARG;
     }
     return esp_netif_set_dns_info(netif, type, &dns);
@@ -118,7 +111,6 @@ static esp_err_t applyStaticIp(esp_netif_t* netif, const WifiStaticIp* cfg) {
     // 目的は果たしているので通す。
     esp_err_t err = esp_netif_dhcpc_stop(netif);
     if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
-        ESP_LOGE(TAG, "DHCPクライアントを停止できない: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -126,14 +118,11 @@ static esp_err_t applyStaticIp(esp_netif_t* netif, const WifiStaticIp* cfg) {
     if (esp_netif_str_to_ip4(cfg->ip, &info.ip) != ESP_OK ||
         esp_netif_str_to_ip4(cfg->gateway, &info.gw) != ESP_OK ||
         esp_netif_str_to_ip4(cfg->netmask, &info.netmask) != ESP_OK) {
-        ESP_LOGE(TAG, "固定IPの書式が不正: ip=%s gw=%s mask=%s", cfg->ip, cfg->gateway,
-                 cfg->netmask);
         return ESP_ERR_INVALID_ARG;
     }
 
     err = esp_netif_set_ip_info(netif, &info);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "固定IPを設定できない: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -142,8 +131,6 @@ static esp_err_t applyStaticIp(esp_netif_t* netif, const WifiStaticIp* cfg) {
     err = setDnsServer(netif, ESP_NETIF_DNS_BACKUP, cfg->dns2);
     if (err != ESP_OK) return err;
 
-    ESP_LOGI(TAG, "固定IPを使う: ip=%s mask=%s gw=%s dns=%s", cfg->ip, cfg->netmask, cfg->gateway,
-             (cfg->dns1 != nullptr && cfg->dns1[0] != '\0') ? cfg->dns1 : "(未設定)");
     return ESP_OK;
 }
 
@@ -165,27 +152,31 @@ static std::vector<wifi_ap_record_t> scanAccessPoints() {
 
     esp_err_t err = esp_wifi_scan_start(nullptr, true);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "スキャンに失敗した: %s。定義順の総当たりへフォールバックする",
-                 esp_err_to_name(err));
+        // スキャン自体が失敗した場合は定義順の総当たりへフォールバックする。
+        s_scan_count = 0;
         return result;
     }
 
     uint16_t ap_num = 0;
     esp_wifi_scan_get_ap_num(&ap_num);
-    if (ap_num == 0) return result;
+    if (ap_num == 0) {
+        s_scan_count = 0;
+        return result;
+    }
+    // 画面へ出すAP総数はバッファ上限で切り詰める前の値を使う。
+    s_scan_count = ap_num;
     if (ap_num > MAX_SCAN_APS) ap_num = MAX_SCAN_APS;
 
     result.resize(ap_num);
     uint16_t actual = ap_num;
     err             = esp_wifi_scan_get_ap_records(&actual, result.data());
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "スキャン結果の取得に失敗した: %s。定義順の総当たりへフォールバックする",
-                 esp_err_to_name(err));
+        // スキャン結果の取得に失敗した場合も定義順の総当たりへフォールバックする。
         result.clear();
+        s_scan_count = 0;
         return result;
     }
     result.resize(actual);
-    ESP_LOGI(TAG, "スキャンで%u件のAPが見つかった", (unsigned)result.size());
     return result;
 }
 
@@ -207,10 +198,26 @@ static std::vector<size_t> orderCandidates(const WifiCandidate* candidates, size
 }
 
 // 1つの候補への接続を試す。timeout_ms待って接続できたらtrue。
-static bool tryCandidate(const WifiCandidate& cand, uint32_t timeout_ms, size_t index,
-                         size_t total) {
+// scannedは直前のスキャンでこの候補が実際に見えていたか(画面表示用)。
+static bool tryCandidate(const WifiCandidate& cand, uint32_t timeout_ms, bool scanned) {
+    strlcpy(s_try_ssid, cand.ssid, sizeof(s_try_ssid));
+    s_try_scanned = scanned;
+
+    // 切断イベントが「運用中の無制限再接続」の分岐へ落ちてこの試行と競合しないよう、
+    // esp_wifi_disconnect()より前にs_probingを立てる。
+    s_probing = true;
+
+    // 前の候補が残したBIT_FAILEDを先に落とす。これをやらないと、この直後の
+    // 「切断イベントを吸う待ち」が古いビットで即座に戻ってしまい、吸う意味が無くなる。
+    xEventGroupClearBits(s_events, BIT_CONNECTED | BIT_FAILED);
+
     // 未接続でも失敗にしない。前の候補が繋がりかけていた状態を確実に落とすため。
     esp_wifi_disconnect();
+
+    // ここで出る切断イベントを吸っておく。吸わずに先へ進むと、遅れて届いた
+    // 切断イベントが下のクリアの後にBIT_FAILEDを立ててしまい、この後の接続試行が
+    // まったく待たずに即失敗する。切断イベントが出ないこともあるので有限待ちにする。
+    xEventGroupWaitBits(s_events, BIT_FAILED, pdFALSE, pdFALSE, pdMS_TO_TICKS(500));
 
     esp_err_t net_err;
     if (cand.static_ip != nullptr) {
@@ -220,8 +227,7 @@ static bool tryCandidate(const WifiCandidate& cand, uint32_t timeout_ms, size_t 
         if (net_err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) net_err = ESP_OK;
     }
     if (net_err != ESP_OK) {
-        ESP_LOGW(TAG, "SSID '%s' のネットワーク設定に失敗した: %s", cand.ssid,
-                 esp_err_to_name(net_err));
+        s_probing = false;
         return false;
     }
 
@@ -235,40 +241,32 @@ static bool tryCandidate(const WifiCandidate& cand, uint32_t timeout_ms, size_t 
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SSID '%s' の設定に失敗した: %s", cand.ssid, esp_err_to_name(err));
+        s_probing = false;
         return false;
     }
 
-    s_probing = true;
-    s_retry   = 0;
     xEventGroupClearBits(s_events, BIT_CONNECTED | BIT_FAILED);
-
-    ESP_LOGI(TAG, "SSID '%s' へ接続を試す(%u/%u)", cand.ssid, (unsigned)(index + 1),
-             (unsigned)total);
 
     err = esp_wifi_connect();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SSID '%s' への接続開始に失敗した: %s", cand.ssid, esp_err_to_name(err));
         s_probing = false;
         return false;
     }
 
     EventBits_t bits = xEventGroupWaitBits(s_events, BIT_CONNECTED | BIT_FAILED, pdFALSE, pdFALSE,
                                            pdMS_TO_TICKS(timeout_ms));
+    s_probing = false;
     if (bits & BIT_CONNECTED) {
-        s_probing = false;
         strlcpy(s_ssid, cand.ssid, sizeof(s_ssid));
-        ESP_LOGI(TAG, "SSID '%s' へ接続した", cand.ssid);
         return true;
     }
 
-    ESP_LOGW(TAG, "SSID '%s' への接続に失敗した(タイムアウト)", cand.ssid);
     return false;
 }
 
 esp_err_t wifiLinkBegin(const WifiCandidate* candidates, size_t count, uint32_t timeout_ms_each) {
     if (candidates == nullptr || count == 0) return ESP_ERR_INVALID_ARG;
-    if (s_started) return wifiLinkWaitConnected(timeout_ms_each) ? ESP_OK : ESP_ERR_TIMEOUT;
+    if (s_started) return ESP_OK;  // 初期化は一度だけ。候補の記憶も済んでいる。
 
     // esp_wifiはキャリブレーションデータの保存にNVSを使う。
     // パーティションが古い/壊れている場合は消して作り直す。
@@ -316,19 +314,36 @@ esp_err_t wifiLinkBegin(const WifiCandidate* candidates, size_t count, uint32_t 
     if (err != ESP_OK) return err;
     s_started = true;
 
-    // 起動直後にスキャンして、実際に見えている候補を優先する。
+    // 候補を記憶する。secrets.hの文字列リテラルを指すだけなので、
+    // 呼び出し元の配列(スタック上)が後で消えても問題ない。
+    s_candidates.assign(candidates, candidates + count);
+    s_timeout_ms_each = timeout_ms_each;
+
+    return ESP_OK;
+}
+
+bool wifiLinkConnectRound() {
+    if (s_candidates.empty()) return false;
+
+    // 候補のタイムアウト直後に接続が成立していることがある。ここで見ずに
+    // 次のesp_wifi_disconnect()へ進むと、繋がった接続を自分から叩き落として
+    // 永久に繋がらなくなる。
+    if (wifiLinkIsConnected()) return true;
+
+    // 見えている候補を優先する。
     std::vector<wifi_ap_record_t> scanned = scanAccessPoints();
-    std::vector<size_t>           order   = orderCandidates(candidates, count, scanned);
+    std::vector<size_t>           order =
+        orderCandidates(s_candidates.data(), s_candidates.size(), scanned);
 
     for (size_t oi = 0; oi < order.size(); oi++) {
-        const WifiCandidate& cand = candidates[order[oi]];
+        const WifiCandidate& cand = s_candidates[order[oi]];
         if (cand.ssid == nullptr || cand.password == nullptr) continue;
-        if (tryCandidate(cand, timeout_ms_each, oi, order.size())) return ESP_OK;
+        bool was_scanned = ssidFoundIn(scanned, cand.ssid);
+        if (tryCandidate(cand, s_timeout_ms_each, was_scanned)) return true;
     }
 
     s_probing = false;
-    ESP_LOGE(TAG, "全%u候補への接続に失敗した", (unsigned)order.size());
-    return ESP_ERR_TIMEOUT;
+    return false;
 }
 
 bool wifiLinkIsConnected() {
@@ -338,19 +353,9 @@ bool wifiLinkIsConnected() {
 
 bool wifiLinkWaitConnected(uint32_t timeout_ms) {
     if (s_events == nullptr) return false;
-
-    EventBits_t bits = xEventGroupWaitBits(s_events, BIT_CONNECTED | BIT_FAILED,
-                                           pdFALSE, pdFALSE,
+    EventBits_t bits = xEventGroupWaitBits(s_events, BIT_CONNECTED, pdFALSE, pdFALSE,
                                            pdMS_TO_TICKS(timeout_ms));
-    if (bits & BIT_CONNECTED) return true;
-
-    if (bits & BIT_FAILED) {
-        // 上限まで再接続して駄目だった状態。次の呼び出しでまた試せるよう戻す。
-        s_retry = 0;
-        xEventGroupClearBits(s_events, BIT_FAILED);
-        esp_wifi_connect();
-    }
-    return false;
+    return (bits & BIT_CONNECTED) != 0;
 }
 
 void wifiLinkGetIp(char* buf, size_t len) {
@@ -361,4 +366,53 @@ void wifiLinkGetIp(char* buf, size_t len) {
 void wifiLinkGetSsid(char* buf, size_t len) {
     if (buf == nullptr || len == 0) return;
     snprintf(buf, len, "%s", s_ssid);
+}
+
+// esp_read_mac()はeFuseから読むので、esp_wifi_init()の前後どちらでも使える
+// (esp_wifi_get_mac()と違いWi-Fiの起動状態に依存しない)。
+void wifiLinkGetMac(char* buf, size_t len) {
+    if (buf == nullptr || len < 18) return;
+
+    uint8_t mac[6] = {};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
+        snprintf(buf, len, "取得失敗");
+        return;
+    }
+    snprintf(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
+             mac[5]);
+}
+
+void wifiLinkGetLastAttempt(WifiAttemptInfo* out) {
+    if (out == nullptr) return;
+    snprintf(out->ssid, sizeof(out->ssid), "%s", s_try_ssid);
+    out->scanned  = s_try_scanned;
+    out->ap_count = s_scan_count;
+    out->reason   = s_last_reason;
+}
+
+// Wi-Fiの切断理由コード(wifi_err_reason_t)を短い日本語へ変換する。
+// 画面の1行(全角10文字以内)に収まる範囲で、原因の切り分けに要る情報だけを返す。
+const char* wifiLinkDescribeReason(uint8_t reason) {
+    switch (reason) {
+        case 1:   return "不明な理由";
+        case 2:   return "認証の期限切れ";
+        case 3:   return "AP側から切断";
+        case 4:   return "無通信で切断";
+        case 8:   return "AP側から切断";
+        case 14:  return "MIC不一致";
+        case 15:  return "4wayタイムアウト";
+        case 16:  return "鍵更新の失敗";
+        case 23:  return "802.1X認証失敗";
+        case 200: return "ビーコン喪失";
+        case 201: return "APが見つからない";
+        case 202: return "認証失敗";
+        case 203: return "接続要求の失敗";
+        case 204: return "ハンドシェイク失敗";
+        case 205: return "接続失敗";
+        case 206: return "AP再起動";
+        case 210: return "暗号方式が不一致";
+        case 211: return "認証方式が下限未満";
+        case 212: return "電波が弱い";
+        default:  return "不明";
+    }
 }

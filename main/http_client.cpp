@@ -4,11 +4,8 @@
 
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
-#include "esp_log.h"
 
 #include "time_util.h"
-
-static const char* TAG = "http_client";
 
 // 本文の既定の上限。PSRAMがあるので余裕はあるが、
 // 認証リダイレクト先のHTMLなど想定外の巨大レスポンスで詰まらないよう蓋をする。
@@ -19,7 +16,6 @@ namespace {
 struct FetchContext {
     HttpResponse* out;
     size_t        max_body;
-    bool          truncated;
 };
 
 esp_err_t onHttpEvent(esp_http_client_event_t* evt) {
@@ -46,11 +42,9 @@ esp_err_t onHttpEvent(esp_http_client_event_t* evt) {
                               ? ctx->max_body - ctx->out->body.size()
                               : 0;
             if (room == 0) {
-                ctx->truncated = true;
                 break;
             }
             size_t take = (size_t)evt->data_len < room ? (size_t)evt->data_len : room;
-            if (take < (size_t)evt->data_len) ctx->truncated = true;
             ctx->out->body.append((const char*)evt->data, take);
             break;
         }
@@ -77,7 +71,6 @@ esp_err_t httpGetJson(const char* url, HttpResponse* out, uint32_t timeout_ms,
     FetchContext ctx = {};
     ctx.out          = out;
     ctx.max_body     = max_body_bytes > 0 ? max_body_bytes : DEFAULT_MAX_BODY;
-    ctx.truncated    = false;
 
     // reserveしておくと本文追記のたびに再確保しないで済む。
     out->body.reserve(8 * 1024);
@@ -95,7 +88,6 @@ esp_err_t httpGetJson(const char* url, HttpResponse* out, uint32_t timeout_ms,
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == nullptr) {
-        ESP_LOGE(TAG, "esp_http_clientの初期化に失敗した");
         return ESP_FAIL;
     }
 
@@ -104,17 +96,6 @@ esp_err_t httpGetJson(const char* url, HttpResponse* out, uint32_t timeout_ms,
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         out->status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "GET %s -> %d (%u bytes)", url, out->status,
-                 (unsigned)out->body.size());
-        if (ctx.truncated) {
-            ESP_LOGW(TAG, "本文が上限(%u bytes)を超えたので切り詰めた",
-                     (unsigned)ctx.max_body);
-        }
-        if (out->status >= 300 && out->status < 400 && !out->location.empty()) {
-            ESP_LOGW(TAG, "リダイレクト先: %s", out->location.c_str());
-        }
-    } else {
-        ESP_LOGE(TAG, "GETに失敗した: %s", esp_err_to_name(err));
     }
 
     esp_http_client_cleanup(client);

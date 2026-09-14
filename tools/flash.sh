@@ -11,14 +11,15 @@
 # 使い方:
 #   tools/flash.sh                          # ビルドから書き込み、その後180秒ログを取る
 #   tools/flash.sh --no-build               # ビルド済みの成果物で書き込む
-#   tools/flash.sh --port COM4 --baud 460800 --monitor 0
+#   tools/flash.sh --port COM21 --baud 460800 --monitor 0
 set -uo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-PORT="COM4"          # ESP32-S3-Touch-LCD-7BのネイティブUSBポート(USB-Serial/JTAG、
-                     # VID:PID=303A:1001)で実測。CH343側(USB TO UART)は別ポート(COM5)で、
-                     # そちらからはROMブートローダに到達できないことを確認済み。
+PORT="COM21"         # ESP32-S3-Touch-LCD-7BのネイティブUSBポート(USB-Serial/JTAG、
+                     # VID:PID=303A:1001)。2026-09-14の実測値。CH343側(USB TO UART)は
+                     # 別ポートに出るが、そちらからはROMブートローダに到達できない。
+                     # 番号は挿し直しやPC構成の変更で変わる(COM4だった時期がある)。
                      # bash tools/win.sh portsで確認して--portで渡すか、ここを書き換える。
 BAUD="921600"
 MONITOR="180"

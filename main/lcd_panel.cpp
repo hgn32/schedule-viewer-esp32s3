@@ -5,13 +5,10 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
-#include "esp_log.h"
 
 #include <LovyanGFX.hpp>
 #include <lgfx/v1/Bus.hpp>
 #include <lgfx/v1/panel/Panel_FrameBufferBase.hpp>
-
-static const char* TAG = "lcd_panel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // esp_lcdのRGBパネル(フレームバッファ)をLovyanGFXのPanel_FrameBufferBase派生で
@@ -43,7 +40,6 @@ public:
 
     bool init(bool) override {
         if (_fb == nullptr) {
-            ESP_LOGE(TAG, "フレームバッファが未設定");
             return false;
         }
 
@@ -64,7 +60,6 @@ public:
         _lines_buffer = (uint8_t**)heap_caps_malloc((size_t)h * sizeof(uint8_t*),
                                                      MALLOC_CAP_DEFAULT);
         if (_lines_buffer == nullptr) {
-            ESP_LOGE(TAG, "行ポインタ配列を確保できない(%d行)", h);
             return false;
         }
         for (int y = 0; y < h; y++) {
@@ -146,19 +141,16 @@ esp_err_t createEspLcdPanel(esp_lcd_panel_handle_t* out_panel, void** out_fb) {
 
     esp_err_t err = esp_lcd_new_rgb_panel(&cfg, out_panel);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_lcd_new_rgb_panelに失敗: %s", esp_err_to_name(err));
         return err;
     }
 
     err = esp_lcd_panel_init(*out_panel);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_lcd_panel_initに失敗: %s", esp_err_to_name(err));
         return err;
     }
 
     err = esp_lcd_rgb_panel_get_frame_buffer(*out_panel, 1, out_fb);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "フレームバッファの取得に失敗: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -180,14 +172,12 @@ esp_err_t lcdPanelBegin() {
     static Lgfx7b gfx;
     gfx.setFrameBuffer((uint8_t*)fb);
     if (!gfx.init()) {
-        ESP_LOGE(TAG, "LGFX_Deviceの初期化に失敗");
         return ESP_FAIL;
     }
     // 回転はここではかけない。LGFX_Deviceは生の向き(1024x600)のまま使い、
     // 回転はDisplay側の描画用スプライトに持たせる(lcd_panel.hのコメント参照)。
 
     s_gfx = &gfx;
-    ESP_LOGI(TAG, "LCDパネルを初期化した(生%dx%d)", gfx.width(), gfx.height());
     return ESP_OK;
 }
 

@@ -36,15 +36,21 @@ Waveshare ESP32-S3-Touch-LCD-7B向けのOutlook予定表ビューア。言語は
 
 ## C++ファイル編集時のルール
 
-- ログは`ESP_LOG*`。各`.cpp`の先頭で`static const char* TAG = "..."`を定義する。
-  `printf`は使わない(UART0にそのまま出てPC側の受信ログを汚す)。
+- **ログは出さない。`ESP_LOG*`も`printf`も追加しないこと。** 運用中(壁掛け・PC非接続)は
+  出力先が無く誰も読まないため、アプリのログは撤去済み。ESP-IDF内部のログも
+  `sdkconfig.defaults`の`CONFIG_LOG_DEFAULT_LEVEL_NONE`で止めてある。
+  失敗を利用者へ伝える必要があるものは画面へ出す(`showBootMessage()` /
+  `showFatalMessage()`)。切り分けのため一時的にログを入れるのは構わないが、
+  **コミットには残さないこと。**
 - `std::string` / `std::vector`は使ってよい(PSRAM 8MBがある)。ただし描画ループ内で
   毎フレーム確保し直すような使い方はしない。
 - 公開関数の先頭でポインタ引数をNULL検査する。
 - 文字列生成は`snprintf`。`strcpy` / `sprintf`は使わない。
 - 初期化・設定系の戻り値は`esp_err_t`、成否だけを見るものは`bool`。
-- ブロッキング待ちはタイムアウト付きで書く(`serialLinkReadLine()`の第2引数のように)。
-- `protocol.cpp` / `schedule.cpp` / `time_util.h`はM5にもIDFにも依存させない。
+- ブロッキング待ちはタイムアウト付きで書く(`wifiLinkWaitConnected()`の引数のように)。
+  無限に待つ必要がある処理(Wi-Fi接続)も、**有限待ちの関数を呼び出し側のループで
+  繰り返す形**で書く。関数の中で無限ループを回さない(画面更新やタッチが止まるため)。
+- `schedule.cpp` / `time_util.h`はM5にもIDFにも依存させない。
   ここを純粋に保っておくとホスト上での単体テストが後から入れられる。
 
 ## 編集後の確認コマンド
@@ -57,6 +63,8 @@ cd /workspaces
 idf.py build
 ```
 
+- 同じことは`.vscode/tasks.json`の「ビルド」「ビルドして書き込み」タスクからも実行できる
+  (ユーザーがエージェントを介さずに試すための入口。手順の実体は同じ`tools/flash.sh`)。
 - 初回のみ`idf.py set-target esp32s3`が必要(devcontainerの`postCreateCommand`で自動実行される)。
 - 警告が新たに増えた場合も原因を報告すること。
 - **実機への書き込みはエージェントが`bash tools/flash.sh`で実行する**(ユーザーに毎回の
@@ -64,10 +72,11 @@ idf.py build
   ログは1行ずつ`logs/`へ流れてくる。ユーザーに依頼するのは**その起動1回だけ**
   (従来の`ssh -N devcontainer`の置き換え)。起動していない場合は`tools/win.sh`が
   10秒でタイムアウトして失敗する。COMポートが不明なときは`bash tools/win.sh ports`、
-  書き換えずに疎通だけ見るときは`bash tools/win.sh probe port=COM4`を使う。
+  書き換えずに疎通だけ見るときは`bash tools/win.sh probe port=COM21`を使う。
   完了待ちはポーリングではなくマーカー待ちで行う。
 - **使うのはネイティブUSBポート**(`VID:PID=303A:1001`)。`tools/flash.sh`の既定値は
-  COM4。PC構成が変わったら`bash tools/win.sh ports`で番号を確認すること。
+  COM21(2026-09-14の実測値。COM4だった時期がある)。挿し直しやPC構成の変更で番号が
+  変わるので、失敗したら`bash tools/win.sh ports`で確認すること。
   **CH343側(`USB TO UART`ポート)は書き込み・監視に使えない**(ROMブートローダに
   到達できない)。
 - **USB/IPは通常使わない**ため`/dev/ttyUSB0`は存在しないのが正常。使うには
@@ -79,9 +88,11 @@ idf.py build
 # 書き込み完了を待つ(1行ずつ流れてくるので、マーカーが出た瞬間に返る)
 until grep -q '=== FLASH RESULT' logs/flash.log 2>/dev/null; do sleep 0.5; done; tail -20 logs/flash.log
 
-# 起動ログの監視(成功文字列だけでなく失敗シグネチャも必ず含める)
+# 起動の監視。アプリもIDFもログを出さないので、平常時のmonitor.logには
+# ROMのブートログ(eFuseでしか止められない)しか出ない。**無音は異常ではない。**
+# 見る価値があるのはクラッシュのシグネチャで、これはログ設定に関係なく出る。
 tail -f logs/monitor.log | grep -E --line-buffered \
-  '=== MONITOR|Guru Meditation|Backtrace:|abort\(\)|assert failed|rst:0x|E \('
+  '=== MONITOR|Guru Meditation|Backtrace:|abort\(\)|assert failed|rst:0x'
 ```
 - 実機はWindows PCに挿さっており、USB/IPで取り込む(`.devcontainer/usb-attach.sh`)。
   Windows側から**コンテナ内のsshd(127.0.0.1:2222、VSCodeのforwardPortsで転送)**へ
@@ -89,7 +100,7 @@ tail -f logs/monitor.log | grep -E --line-buffered \
   `usbip attach`/`detach`は**devcontainer内**で実行する(attachの実体`vhci_hcd`は
   ホストLinuxのカーネル側なので、ホストで`modprobe vhci-hcd`だけは事前に要る)。
   手順はREADME.mdの「実機接続(USB/IP)」節を参照。
-- 自動テストは現状このrepoに存在しない。純粋なロジック(`protocol.cpp` / `schedule.cpp` /
+- 自動テストは現状このrepoに存在しない。純粋なロジック(`schedule.cpp` /
   `time_util.h`)の検証が必要になった場合はESP-IDFのUnityを導入することをまず提案すること。
 
 ## 調査・提案の進め方(絶対厳守)

@@ -1,11 +1,7 @@
 #include "io_ext.h"
 
-#include "esp_log.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-static const char* TAG = "io_ext";
 
 // Waveshare ESP32-S3-Touch-LCD-7Bの基板配線。
 static const gpio_num_t IO_EXT_SDA      = GPIO_NUM_8;
@@ -54,18 +50,8 @@ static esp_err_t writeReg(uint8_t reg, uint8_t value) {
     esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), IO_EXT_TIMEOUT_MS);
     if (err == ESP_OK) return err;
 
-    ESP_LOGW(TAG, "レジスタ0x%02Xへの書き込みに失敗した(%s)。2ms待って1回だけ再送する",
-            reg, esp_err_to_name(err));
     vTaskDelay(pdMS_TO_TICKS(2));
     return i2c_master_transmit(s_dev, buf, sizeof(buf), IO_EXT_TIMEOUT_MS);
-}
-
-// レジスタを1バイト読む。書き込みが効いているかの確認に使う。
-static esp_err_t readReg(uint8_t reg, uint8_t* out) {
-    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
-    if (out == nullptr) return ESP_ERR_INVALID_ARG;
-
-    return i2c_master_transmit_receive(s_dev, &reg, 1, out, 1, IO_EXT_TIMEOUT_MS);
 }
 
 esp_err_t ioExtBegin() {
@@ -81,12 +67,10 @@ esp_err_t ioExtBegin() {
 
     esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2Cバスの初期化に失敗: %s", esp_err_to_name(err));
         return err;
     }
 
     // CH32V003はACKを返す(I2Cスキャンで0x24が応答することを実機で確認済み)。
-    // ACK検査は有効のままにして、書き込み失敗をログに出せるようにする。
     i2c_device_config_t dev_cfg = {};
     dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     dev_cfg.device_address  = IO_EXT_ADDR;
@@ -94,7 +78,6 @@ esp_err_t ioExtBegin() {
 
     err = i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "IO拡張チップのデバイス登録に失敗: %s", esp_err_to_name(err));
         i2c_del_master_bus(s_bus);
         s_bus = nullptr;
         return err;
@@ -104,7 +87,6 @@ esp_err_t ioExtBegin() {
     // 前回の起動で書いた値が残るので、毎回ここで明示的に既知の状態へ戻す。
     err = writeReg(REG_MODE, MODE_ALL_OUTPUT);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "モードレジスタの設定に失敗: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -112,7 +94,6 @@ esp_err_t ioExtBegin() {
     s_output_shadow = OUTPUT_DEFAULT;
     err = writeReg(REG_IO_OUT, s_output_shadow);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "出力値の初期化に失敗: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -123,13 +104,6 @@ esp_err_t ioExtBegin() {
     writeReg(REG_IO_OUT, s_output_shadow);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    uint8_t readback = 0;
-    if (readReg(REG_IO_IN, &readback) == ESP_OK) {
-        ESP_LOGI(TAG, "CH32V003を初期化した(出力=0x%02X 読み戻し=0x%02X)",
-                s_output_shadow, readback);
-    } else {
-        ESP_LOGI(TAG, "CH32V003を初期化した(出力=0x%02X 読み戻しは不可)", s_output_shadow);
-    }
     return ESP_OK;
 }
 
@@ -140,7 +114,6 @@ esp_err_t ioExtSetOutput(uint8_t pin, bool level) {
     // USB_SELをHighにするとネイティブUSBがCAN側へ切り替わり、書き込み経路も
     // ログ取得も失われる。このプロジェクトはCANを使わないので上げさせない。
     if (pin == EXIO_USB_SEL && level) {
-        ESP_LOGW(TAG, "USB_SEL(bit%u)はLow固定。Highにする要求を無視した", pin);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -153,17 +126,16 @@ esp_err_t ioExtSetOutput(uint8_t pin, bool level) {
     return writeReg(REG_IO_OUT, s_output_shadow);
 }
 
-esp_err_t ioExtSetBacklight(uint8_t percent) {
+esp_err_t ioExtBacklightEnable(bool on) {
     if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
 
-    // 消灯はDISP(IO2)をLowにして行う。PWM(0x05)は輝度を変えるだけで、
-    // 255を書いても完全には消えないことを実機で確認済み。
-    if (percent == 0) {
-        return ioExtSetOutput(EXIO_LCD_BL, false);
-    }
+    // Waveshare公式のwavesahre_rgb_lcd_bl_on()/bl_off()と同じく、
+    // DISP(IO2)の1ビットだけを操作する。PWM(0x05)には触らない。
+    return ioExtSetOutput(EXIO_LCD_BL, on);
+}
 
-    esp_err_t err = ioExtSetOutput(EXIO_LCD_BL, true);
-    if (err != ESP_OK) return err;
+esp_err_t ioExtSetBacklightLevel(uint8_t percent) {
+    if (s_dev == nullptr) return ESP_ERR_INVALID_STATE;
 
     // PWMは反転しており、書く値が大きいほど暗い(0が最大輝度)。
     uint8_t clamped = (percent > 100) ? 100 : percent;
