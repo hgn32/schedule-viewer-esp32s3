@@ -444,7 +444,7 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store) {
 
     if (parsed.empty()) {
         // 予定0件とパース失敗を区別する。
-        // 配列が空、または全件が中止/終日で除外されただけなら成功扱いにする。
+        // 配列が空、または全件が中止や空き(showAs=free)で除外されただけなら成功扱いにする。
         if (skipped == 0) {
             store->clear();
             return true;

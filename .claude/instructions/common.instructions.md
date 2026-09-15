@@ -61,9 +61,15 @@ idf.py build
 
 ### 4-2. テスト
 
-- 自動テストは現状このrepoに存在しない。外部依存の無い純粋なロジック
-  （`main/schedule.cpp` / `main/time_util.h`）の検証が必要になったら、
-  ESP-IDFのUnityを導入することをまず提案すること。勝手に導入しない。
+外部依存の無いロジックはホスト上の単体テストで検証する。実機もフラッシュも要らない。
+
+```bash
+bash tools/run-host-tests.sh
+```
+
+- 対象は`main/text_util.cpp` / `main/time_util.h` / `main/schedule.cpp` /
+  `main/json_parser.cpp`。これらの挙動を変えたらテストも足すこと。
+- LCD・Wi-Fi・タッチに依存するコードはホストで動かせない。実機で確認すること。
 
 ### 4-3. 実行時のルール
 

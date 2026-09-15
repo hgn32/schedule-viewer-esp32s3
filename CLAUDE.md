@@ -100,8 +100,17 @@ tail -f logs/monitor.log | grep -E --line-buffered \
   `usbip attach`/`detach`は**devcontainer内**で実行する(attachの実体`vhci_hcd`は
   ホストLinuxのカーネル側なので、ホストで`modprobe vhci-hcd`だけは事前に要る)。
   手順はREADME.mdの「実機接続(USB/IP)」節を参照。
-- 自動テストは現状このrepoに存在しない。純粋なロジック(`schedule.cpp` /
-  `time_util.h`)の検証が必要になった場合はESP-IDFのUnityを導入することをまず提案すること。
+- **ロジックを変えたらホストの単体テストも走らせること(絶対厳守)。** 実機もフラッシュも
+  要らない。ビルドと同じく、通ったことを実際の出力で確認してから報告する。
+
+```bash
+bash tools/run-host-tests.sh
+```
+
+  対象は`main/text_util.cpp` / `main/time_util.h` / `main/schedule.cpp` /
+  `main/json_parser.cpp`。**これらの挙動を変えたらテストも足すこと。**
+  LCD・Wi-Fi・タッチに依存するコードはホストで動かせないので対象外(実機で確認する)。
+  テスト本体は`test/host/main/`にあり、ESP-IDFのUnityをlinuxターゲットで使う。
 
 ## 調査・提案の進め方(絶対厳守)
 

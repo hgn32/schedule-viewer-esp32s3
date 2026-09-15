@@ -49,6 +49,8 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
 | `.devcontainer/flash.ps1` | Windows側で1回だけ手実行する版(自動化を使わない場合のフォールバック) |
 | `tools/win_flash.py` | Windows側で走る書き込み(esptool起動)とシリアル監視。出力を1行ずつsshで`logs/`へ流す |
 | `tools/stage-winflash.sh` | Windowsへ渡す一式(esptool・pyserial・intelhex・成果物)を`build/winflash/`へまとめる |
+| `test/host/` | ホスト(ESP-IDFのlinuxターゲット)で走る単体テスト。ESP-IDF同梱のUnityを使う |
+| `tools/run-host-tests.sh` | 上記をlinuxターゲットで設定→ビルド→実行する。**実機もフラッシュも要らない** |
 | `logs/` | 実機のログ置き場(`build.log` / `flash.log` / `monitor.log` / `win.log`)。**git追跡外** |
 
 `main/CMakeLists.txt`は`main/*.cpp`を`GLOB_RECURSE`しているので、
@@ -229,3 +231,20 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
     `main.cpp`はWi-Fi接続後、`timeSyncBegin()`を呼んでから`timeSyncIsSynced()`が
     trueになるまで待ってから予定取得へ進む。同期完了は`sync_cb`で立てたフラグで判定する
     (`sntp_get_sync_status()`は読み出しでリセットされるため使えない)。
+
+
+19. **単体テストはホスト(ESP-IDFのlinuxターゲット)で走らせる。** 実機を占有せず、
+    書き込みも要らずに回せるようにするため。`bash tools/run-host-tests.sh`。
+    - 対象は**外部依存の無いロジックだけ**(`text_util.cpp` / `time_util.h` /
+      `schedule.cpp` / `json_parser.cpp`)。LCD・Wi-Fi・タッチに依存するコードは
+      ホストで動かせないので対象にしない。`schedule.cpp`と`time_util.h`を
+      M5にもIDFにも依存させない方針(決定事項の前提)は、このためのもの。
+    - `test/host`は**独立したIDFプロジェクト**で、アプリのソースをコピーせず
+      `main/CMakeLists.txt`から直接コンパイルする(テスト用の写しを作らない)。
+      `sdkconfig`も`build/`も実機用とは別ディレクトリなので干渉しない。
+    - **`TEST_CASE()`での自動登録は使わず、`RUN_TEST()`を明示的に並べる。**
+      登録方式はIDFのテストランナー側の設定に依存するため、依存の少ない方を選んだ。
+    - `json_parser`のテストにはサーバの**実スキーマ**をそのまま入れてある。
+      ただし**氏名だけは架空のものへ差し替える**こと(リポジトリに個人情報を残さない)。
+    - 退行検出の要:「終日予定は`showAs=free`でも除外しない」を必ず保つこと
+      (Outlookの終日予定は既定で`free`。順序を戻すと終日予定が1件も残らない)。
