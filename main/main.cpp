@@ -38,6 +38,9 @@ static const uint8_t BACKLIGHT_PERCENT = 80;
 // タイムライン全体の再描画は重いので、分の変わり目(秒=0)を避けてこの秒へずらす。
 // 00秒には時計の部分更新だけを行い、時計が止まって見えないようにする。
 static const int TIMELINE_REDRAW_SEC = 5;
+// 予定詳細ダイアログの自動クローズまでの経過時間。壁掛けで閉じ忘れると
+// 更新が止まったままになるため、開けっ放しにしない。
+static const uint32_t DIALOG_TIMEOUT_MS = 20000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -264,10 +267,14 @@ extern "C" void app_main(void) {
     // 誤動作を防ぐためのフラグ。新しいタッチが始まるたび(Press発生時)に
     // falseへ戻すので、次のタッチでは通常どおりLongTapが効く。
     bool     suppress_longtap = false;
+    // ダイアログを開いた時刻(ms)。自動クローズの起点にする。
+    uint32_t dialog_opened_ms = 0;
 
     for (;;) {
-        // タッチによる画面ON/OFF。取得・描画より前に処理してよい(軽い処理のため)。
-        TouchEvent touch_ev = touchPoll();
+        // タッチによる画面ON/OFF・予定詳細ダイアログ。取得・描画より前に処理してよい
+        // (軽い処理のため)。
+        int        tx = 0, ty = 0;
+        TouchEvent touch_ev = touchPoll(&tx, &ty);
         if (touch_ev == TouchEvent::Press) {
             // 新しいタッチの開始。前のタッチの抑制状態を引きずらない。
             suppress_longtap = false;
@@ -282,13 +289,44 @@ extern "C" void app_main(void) {
                 // 判定されて即座に消灯してしまわないよう抑制する。
                 suppress_longtap = true;
             }
+        } else if (touch_ev == TouchEvent::Tap) {
+            // 画面ONかつ初回描画済み、かつ点灯のためのタップ(suppress_longtap)で
+            // なければ予定のタップとして扱う。点灯直後にいきなり詳細が開くと
+            // 誤操作になるため。
+            if (screen_on && rendered && !suppress_longtap) {
+                if (display.isEventDialogOpen()) {
+                    display.closeEventDialog();
+                    display.renderTimeline(store, nowUtc());
+                    last_minute = (int)(nowUtc() / 60);
+                } else if (display.openEventDialog(tx, ty, nowUtc())) {
+                    dialog_opened_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                }
+            }
         } else if (touch_ev == TouchEvent::LongTap) {
             if (screen_on && !suppress_longtap) {
+                // 見えないうちに畳んでおく。開いたまま消灯すると、次に点灯したとき
+                // ダイアログが残って見えてしまう。
+                if (display.isEventDialogOpen()) {
+                    display.closeEventDialog();
+                    display.renderTimeline(store, nowUtc());
+                    last_minute = (int)(nowUtc() / 60);
+                }
                 // 消灯もDISP(IO2)のイネーブルだけを落とす。公式のbl_off()と同じ操作で、
                 // PWM(0x05)には触らない。
                 if (ioExtBacklightEnable(false) == ESP_OK) {
                     screen_on = false;
                 }
+            }
+        }
+
+        // 開いてからDIALOG_TIMEOUT_MSが経過したダイアログは自動で閉じる。
+        // 壁掛けで閉じ忘れると更新が止まったままになるため。
+        if (display.isEventDialogOpen()) {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            if (now_ms - dialog_opened_ms >= DIALOG_TIMEOUT_MS) {
+                display.closeEventDialog();
+                display.renderTimeline(store, nowUtc());
+                last_minute = (int)(nowUtc() / 60);
             }
         }
 
@@ -335,7 +373,8 @@ extern "C" void app_main(void) {
             // 2. タイムライン全体の再描画。00秒を避けてTIMELINE_REDRAW_SECへずらす。
             int cur_minute = (int)(now / 60);
             int cur_sec    = (int)(now % 60);
-            if (cur_sec >= TIMELINE_REDRAW_SEC && (cur_minute != last_minute || timeline_dirty)) {
+            if (cur_sec >= TIMELINE_REDRAW_SEC && (cur_minute != last_minute || timeline_dirty) &&
+                !display.isEventDialogOpen()) {
                 display.renderTimeline(store, now);
                 last_minute    = cur_minute;
                 timeline_dirty = false;

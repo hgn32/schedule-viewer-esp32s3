@@ -47,6 +47,16 @@ public:
     // 仮の予定(is_tentative)は明滅の対象にしない(枠色と破線だけで示す)。
     void tickBlink(uint32_t now_utc, uint32_t now_ms);
 
+    // タップ位置(論理座標)に予定枠があればダイアログを開いてtrueを返す。
+    // 無ければ何も描かずfalseを返す。既にダイアログが開いている場合もfalse。
+    bool openEventDialog(int x, int y, uint32_t now_utc);
+
+    bool isEventDialogOpen() const { return _dialog_open; }
+
+    // ダイアログの表示状態を解除する。画面はこの時点では戻らないので、
+    // 呼び出し側は続けてrenderTimeline()を呼ぶこと(内容が同じでも必ず描き直す)。
+    void closeEventDialog();
+
 private:
     struct BoxRect {
         int x = 0, y = 0, w = 0, h = 0;
@@ -66,19 +76,42 @@ private:
         bool        phase;
     };
 
+    // タップのヒット判定に使う、直近のrenderTimeline()で実際に描いた枠。
+    struct HitBox {
+        BoxRect rect;
+        Event   event;
+    };
+
     // ─ 描画の内訳 ─
     void drawHeader(const struct tm& jst_now, uint32_t now_utc);
     void drawClock(const std::string& time_str);
     void drawHourGrid(uint32_t display_start_utc, uint32_t display_end_utc);
     void drawEventBox(const LayoutEvent& le, int level, bool blink_phase,
                       uint32_t now_utc, uint32_t display_start_utc);
+
+    // 終日予定をヘッダー直下の帯に横並びで描く。all_dayが空なら呼ばない。
+    void drawAllDayBand(const std::vector<Event>& all_day);
+
+    // 鍵マーク。幅10px、高さ11px。フォントに錠前のグリフが無いため図形で描く。
+    // (x, y)は左上。sensitivityがnormal以外の予定の件名・場所の代わりに使う。
+    void drawLockIcon(int x, int y, uint32_t color);
     void drawNowLineFull();
     void redrawBoxAndNowLine(const LayoutEvent& le, int level, bool blink_phase,
                              uint32_t now_utc);
 
+    // 予定詳細ダイアログを描く。openEventDialog()から呼ぶ。
+    void drawEventDialog(const Event& event, int level);
+
+    // pxピクセル高でmax_w以内に収まるよう文字単位で折り返す。max_lines行を超える分は
+    // 最後の行の末尾を"..."にして捨てる。日本語には単語境界が無いので文字単位で折る。
+    std::vector<std::string> wrapText(const std::string& src, int px, int max_w,
+                                      int max_lines) const;
+
     // 仮の予定の枠を破線に見せる。実線で描いた角丸枠の直線部分へ、
     // 等間隔にgap_colorを上書きする(LovyanGFXに破線のdrawRoundRect()が無いため)。
-    void dashRoundRectEdges(const BoxRect& r, int border_w, uint32_t gap_color);
+    // radiusには呼び出し元のfillRoundRect()/drawRoundRect()と必ず同じ値を渡すこと
+    // (ずれると角の丸みの部分に隙間が出る)。
+    void dashRoundRectEdges(const BoxRect& r, int border_w, uint32_t gap_color, int radius);
 
     std::vector<LayoutEvent> layoutEvents(std::vector<Event> events);
     BoxRect eventBoxRect(const LayoutEvent& le, uint32_t display_start_utc,
@@ -100,8 +133,12 @@ private:
     // スプライトの指定矩形だけをLCDへ転送する。
     void pushRect(int x, int y, int w, int h);
 
-    static int   nowLineY();
-    static float pxPerSec() { return (float)TIMELINE_H / (DISP_HOURS * 3600); }
+    // 終日予定の帯ぶんタイムラインの上端が下がるので、Y座標の基準は
+    // HEADER_Hではなく下のtimelineTop()を使う(_band_hに依存するためstaticにしない)。
+    int   timelineTop() const { return HEADER_H + _band_h; }
+    int   timelineH()   const { return SCR_H - timelineTop(); }
+    float pxPerSec()    const { return (float)timelineH() / (DISP_HOURS * 3600); }
+    int   nowLineY()    const { return timelineTop() + (int)(NOW_OFFSET_SEC * pxPerSec()); }
     static int   clockRectW();
     static int   clockRectH() { return HEADER_H - 8; }
     static int   clockRectX();
@@ -111,11 +148,15 @@ private:
     static const int SCR_W      = 600;
     static const int SCR_H      = 1024;
     static const int HEADER_H   = 76;
-    static const int TIMELINE_H = SCR_H - HEADER_H;
     static const int LABEL_W    = 60;
     static const int CONTENT_X  = LABEL_W;
     static const int CONTENT_W  = SCR_W - LABEL_W;
     static const int DISP_HOURS = 12;
+
+    // 終日予定の帯の高さ。終日予定が1件も無い日は帯を出さない(_band_h = 0)。
+    static const int ALLDAY_BAND_H = 28;
+    static const int FS_ALLDAY     = 16; // 帯の左ラベル("終日")
+    static const int ALLDAY_RADIUS = 4;  // 帯の枠の角丸。dashRoundRectEdges()にも同じ値を渡す
     // 現在時刻線は表示窓の先頭からこの秒数だけ下に固定する
     // (窓の先頭 = now - NOW_OFFSET_SEC なので、現在時刻線のY座標は常に一定になる)。
     static const uint32_t NOW_OFFSET_SEC = 3600;
@@ -157,8 +198,27 @@ private:
     static const int DASH_ON_PX  = 8;
     static const int DASH_OFF_PX = 5;
 
+    // ─ 予定詳細ダイアログ ─
+    static const int DLG_W          = 520; // ダイアログの幅
+    static const int DLG_PAD        = 20;  // 内側の余白
+    static const int DLG_RADIUS     = 12;
+    static const int DLG_BORDER_W   = 2;
+    static const int DLG_HIT_MARGIN = 6;   // ヒット判定でYを上下に広げる量
+    static const int FS_DLG_TIME    = 24;
+    static const int FS_DLG_TITLE   = 22;
+    static const int FS_DLG_SUB     = 18;
+    static const int FS_DLG_BODY    = 16;
+    static const int DLG_TITLE_MAX_LINES = 2;
+    static const int DLG_LOC_MAX_LINES   = 2;
+    // ダイアログの高さの上限。ヘッダー(時計の部分更新が走る)に掛からない範囲いっぱい。
+    static const int DLG_MAX_H = SCR_H - HEADER_H - 16;
+
     LGFX_Device* _gfx = nullptr; // begin()前はnullptr
     LGFX_Sprite  _canvas;        // 600x1024 RGB565、PSRAM
+
+    // 直近のrenderTimeline()で使った終日帯の高さ。0なら帯なし。
+    // pxPerSec()やnowLineY()がこれに依存するので、レイアウト計算より前に決めること。
+    int _band_h = 0;
 
     bool        _has_rendered   = false;
     uint32_t    _last_signature = 0;
@@ -169,4 +229,7 @@ private:
 
     std::vector<EmphasisRecord> _emphasis_history;
     std::vector<BlinkEntry>     _blinks;
+
+    std::vector<HitBox> _last_boxes;
+    bool                _dialog_open = false;
 };

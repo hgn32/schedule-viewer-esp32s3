@@ -2,33 +2,6 @@
 
 namespace {
 
-// UTF-8を1文字読む。戻り値は進んだバイト数。不正な並びは1バイト進めてU+FFFDにする。
-size_t utf8Next(const std::string& s, size_t i, uint32_t* out) {
-    const unsigned char c = (unsigned char)s[i];
-    const size_t rest = s.size() - i;
-
-    if (c < 0x80) {
-        *out = c;
-        return 1;
-    }
-    if ((c & 0xE0) == 0xC0 && rest >= 2) {
-        *out = ((uint32_t)(c & 0x1F) << 6) | (uint32_t)(s[i + 1] & 0x3F);
-        return 2;
-    }
-    if ((c & 0xF0) == 0xE0 && rest >= 3) {
-        *out = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[i + 1] & 0x3F) << 6) |
-               (uint32_t)(s[i + 2] & 0x3F);
-        return 3;
-    }
-    if ((c & 0xF8) == 0xF0 && rest >= 4) {
-        *out = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[i + 1] & 0x3F) << 12) |
-               ((uint32_t)(s[i + 2] & 0x3F) << 6) | (uint32_t)(s[i + 3] & 0x3F);
-        return 4;
-    }
-    *out = 0xFFFD;
-    return 1;
-}
-
 void utf8Append(std::string* dst, uint32_t cp) {
     if (cp < 0x80) {
         dst->push_back((char)cp);
@@ -92,6 +65,34 @@ uint32_t withHandakuten(uint32_t cp) {
 
 }  // namespace
 
+size_t utf8NextChar(const std::string& s, size_t i, uint32_t* out) {
+    if (out == nullptr || i >= s.size()) return 0;
+
+    const unsigned char c = (unsigned char)s[i];
+    const size_t rest = s.size() - i;
+
+    if (c < 0x80) {
+        *out = c;
+        return 1;
+    }
+    if ((c & 0xE0) == 0xC0 && rest >= 2) {
+        *out = ((uint32_t)(c & 0x1F) << 6) | (uint32_t)(s[i + 1] & 0x3F);
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0 && rest >= 3) {
+        *out = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[i + 1] & 0x3F) << 6) |
+               (uint32_t)(s[i + 2] & 0x3F);
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0 && rest >= 4) {
+        *out = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[i + 1] & 0x3F) << 12) |
+               ((uint32_t)(s[i + 2] & 0x3F) << 6) | (uint32_t)(s[i + 3] & 0x3F);
+        return 4;
+    }
+    *out = 0xFFFD;
+    return 1;
+}
+
 std::string normalizeText(const std::string& src) {
     std::string out;
     out.reserve(src.size());
@@ -99,7 +100,7 @@ std::string normalizeText(const std::string& src) {
     size_t i = 0;
     while (i < src.size()) {
         uint32_t cp = 0;
-        i += utf8Next(src, i, &cp);
+        i += utf8NextChar(src, i, &cp);
 
         if (cp == 0x3000) {          // 全角スペース
             cp = 0x20;
@@ -111,7 +112,7 @@ std::string normalizeText(const std::string& src) {
             // 直後の濁点・半濁点は前の文字へ合成する(NFKCと同じ扱い)。
             if (i < src.size()) {
                 uint32_t next = 0;
-                const size_t adv = utf8Next(src, i, &next);
+                const size_t adv = utf8NextChar(src, i, &next);
                 if (next == 0xFF9E) {  // ﾞ
                     const uint32_t merged = withDakuten(cp);
                     if (merged != 0) {

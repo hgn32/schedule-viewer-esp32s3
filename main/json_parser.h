@@ -12,10 +12,12 @@
 //
 // 表示対象から外す予定:
 //   isCancelled: true         中止された会議
-//   isAllDay:    true         00:00〜翌00:00の24時間枠になり12時間タイムラインを潰すため
 //   showAs:      free         空き(OutlookのBusyStatus 0)
 // showAs: tentative(BusyStatus 1、仮の予定)は表示するが、明滅させず枠線を破線にする
 // (Event::is_tentative、main/display.cpp)。
+// isAllDay: true(終日予定、00:00〜翌00:00の24時間枠)は除外せず取り込む。
+// 12時間タイムラインには載せず、ヘッダー直下の帯に出す
+// (Event::is_all_day、main/display.cpp、Display::drawAllDayBand())。
 //
 // 受け付ける全体構造:
 //   [ {...}, {...} ]                     ルートが配列
@@ -25,10 +27,16 @@
 //   { "data": { "events": [...] } }      1段だけ入れ子も追う
 //
 // 1件あたりのフィールド:
-//   件名   subject / title / name / summary
-//   開始   start / startTime / start_time / startDateTime / begin
-//   終了   end / endTime / end_time / endDateTime / finish
-//   場所   location / place / room / locationName
+//   件名     subject / title / name / summary
+//   開始     start / startTime / start_time / startDateTime / begin
+//   終了     end / endTime / end_time / endDateTime / finish
+//   場所     location / place / room / locationName
+//   本文     bodyPreview(無ければbody)。行末の空白除去・連続空行の畳み込みを
+//            行い、kBodyMaxBytesで切ってからEvent::bodyへ格納する(詳細ダイアログ用)。
+//            定型文の除去はサーバ側で行うため、デバイス側では削らない
+//   主催者   organizerName / organizer
+//   状態等   responseStatus / importance / sensitivity / categories /
+//            isOrganizer / isRecurring / isDraft / lastModifiedAt
 //
 // 時刻の値は次のいずれでもよい:
 //   "2026-08-31T09:00:00Z" / "2026-08-31T09:00:00+09:00" / "2026-08-31 09:00:00"

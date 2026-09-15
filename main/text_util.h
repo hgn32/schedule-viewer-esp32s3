@@ -15,3 +15,8 @@
 // - 半角カナ(U+FF61〜U+FF9F)を全角カナにする(濁点・半濁点は合成する)
 // - 前後の空白を落とす
 std::string normalizeText(const std::string& src);
+
+// UTF-8を1文字読む。戻り値は進んだバイト数。不正な並びは1バイト進めてU+FFFDにする。
+// display.cppの折り返し(wrapText())が文字単位で幅を測るために使う。
+// out == nullptr、またはi >= s.size()なら0を返す。
+size_t utf8NextChar(const std::string& s, size_t i, uint32_t* out);
