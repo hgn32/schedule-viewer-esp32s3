@@ -13,6 +13,7 @@
 #include "lcd_panel.h"
 #include "schedule.h"
 #include "secrets.h"
+#include "time_sync.h"
 #include "time_util.h"
 #include "touch.h"
 #include "wifi_link.h"
@@ -30,6 +31,8 @@ static const uint32_t RETRY_INTERVAL_SEC = 60;
 static const uint32_t LOOP_TICK_MS = 100;
 // Wi-Fi候補が全滅したときの再スキャンまでの待ち時間。
 static const uint32_t WIFI_RESCAN_WAIT_MS = 5000;
+// SNTP同期待ちのポーリング間隔。
+static const uint32_t TIME_SYNC_POLL_MS = 500;
 // 起動後、表示ができてから点灯するバックライトの輝度(%)。
 static const uint8_t BACKLIGHT_PERCENT = 80;
 // タイムライン全体の再描画は重いので、分の変わり目(秒=0)を避けてこの秒へずらす。
@@ -101,15 +104,7 @@ static bool fetchSchedule(ScheduleStore* store) {
         return false;
     }
 
-    uint32_t server_now = 0;
-    if (!parseScheduleJson(res.body, store, &server_now)) return false;
-
-    // 時刻の優先順位: JSON本文 > Dateヘッダ。RTCが無い基板なのでシステム時刻へ反映するだけ。
-    uint32_t new_time = server_now != 0 ? server_now : res.date_utc;
-    if (new_time != 0) {
-        setSystemTime(new_time);
-    }
-    return true;
+    return parseScheduleJson(res.body, store);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,6 +230,23 @@ extern "C" void app_main(void) {
             snprintf(boot_wifi_msg_prev, sizeof(boot_wifi_msg_prev), "%s", boot_wifi_msg);
         }
         vTaskDelay(pdMS_TO_TICKS(WIFI_RESCAN_WAIT_MS));
+    }
+
+    // 時刻源はSNTPのみ(JSON本文/Dateヘッダは見ない)。RTCが無いため、
+    // 同期が済むまではタイムラインを描けるものが無い。
+    if (timeSyncBegin(NTP_SERVER) != ESP_OK) {
+        // 初期化そのものの失敗は再試行しても直らないので停止する。
+        display.showFatalMessage("時刻同期の初期化失敗");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    char time_sync_msg[128];
+    snprintf(time_sync_msg, sizeof(time_sync_msg), "時刻同期中...\nNTP %s", NTP_SERVER);
+    display.showBootMessage(time_sync_msg);
+    while (!timeSyncIsSynced()) {
+        vTaskDelay(pdMS_TO_TICKS(TIME_SYNC_POLL_MS));
     }
 
     display.showBootMessage("スケジュール取得中...");

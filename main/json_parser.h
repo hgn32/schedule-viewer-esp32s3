@@ -36,8 +36,5 @@
 //   { "dateTime": "2026-08-31T00:00:00.0000000", "timeZone": "UTC" }
 
 // bodyを解析してstoreへ追加する(成功時は先にstore->clear()する)。
-// server_now_utcが非nullで、JSON側に現在時刻(now / serverTime / currentTime)が
-// 入っていればそれを書き込む。無ければ触らない。
 // 1件も取り出せなかった場合はfalseを返す(storeは変更しない)。
-bool parseScheduleJson(const std::string& body, ScheduleStore* store,
-                       uint32_t* server_now_utc);
+bool parseScheduleJson(const std::string& body, ScheduleStore* store);

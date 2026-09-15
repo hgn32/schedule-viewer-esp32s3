@@ -1,22 +1,14 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <ctime>
 #include <string>
-#include <sys/time.h>
 
 // システムのTZはapp_main()で"UTC0"に固定している。
 // mktime / gmtime_rはどちらもUTCとして働く前提でこのファイルを書いている。
 static constexpr int JST_OFFSET = 32400; // UTC+9 in seconds
 
 static const char* const WEEKDAYS_JA[] = {"日","月","火","水","木","金","土"};
-
-// Set ESP32 system clock from UTC epoch
-inline void setSystemTime(uint32_t utc_epoch) {
-    struct timeval tv = {(time_t)utc_epoch, 0};
-    settimeofday(&tv, nullptr);
-}
 
 // Current UTC epoch from system clock
 inline uint32_t nowUtc() {
@@ -62,7 +54,8 @@ inline std::string formatHour(int hour) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// サーバのJSON / HTTPヘッダから受け取る時刻表現のパース。
+// サーバのJSONに含まれる予定の時刻表現のパース。システムクロック自体は
+// SNTP(time_sync.cpp)で合わせるため、ここでは扱わない。
 // TZ=UTC0前提なのでmktimeがそのままUTC epochを返す(このファイル冒頭の注記を参照)。
 
 // 分解された年月日時分秒(UTC)をepochへ。年が1970未満なら0を返す。
@@ -137,39 +130,5 @@ inline bool parseIso8601(const char* s, uint32_t* out, int fallback_offset_sec =
     int64_t utc = (int64_t)epoch_local - offset_sec;
     if (utc < 0) return false;
     *out = (uint32_t)utc;
-    return true;
-}
-
-// RFC7231のIMF-fixdate("Sun, 06 Nov 1994 08:49:37 GMT")をUTC epochへ。
-// HTTPのDateヘッダはこの形しか返さない決まりなので、旧2形式は扱わない。
-inline bool parseHttpDate(const char* s, uint32_t* out) {
-    if (s == nullptr || out == nullptr) return false;
-
-    // "Sun, " の5文字を飛ばす。曜日名は使わない。
-    const char* p = strchr(s, ',');
-    p             = (p != nullptr) ? p + 1 : s;
-    while (*p == ' ') p++;
-
-    int  mday = 0, year = 0, hour = 0, min = 0, sec = 0;
-    char mon_name[4] = {};
-    if (sscanf(p, "%2d %3s %4d %2d:%2d:%2d", &mday, mon_name, &year,
-               &hour, &min, &sec) != 6) {
-        return false;
-    }
-
-    static const char* const MONTHS[] = {"Jan","Feb","Mar","Apr","May","Jun",
-                                         "Jul","Aug","Sep","Oct","Nov","Dec"};
-    int mon = 0;
-    for (int i = 0; i < 12; i++) {
-        if (strncmp(mon_name, MONTHS[i], 3) == 0) {
-            mon = i + 1;
-            break;
-        }
-    }
-    if (mon == 0) return false;
-
-    uint32_t epoch = epochFromUtcParts(year, mon, mday, hour, min, sec);
-    if (epoch == 0) return false;
-    *out = epoch;
     return true;
 }

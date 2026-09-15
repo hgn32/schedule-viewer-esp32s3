@@ -12,7 +12,6 @@
 struct HttpResponse {
     int         status = 0;   // HTTPステータス。0は接続そのものに失敗した場合
     std::string body;         // レスポンス本文(JSONを想定)
-    uint32_t    date_utc = 0; // Dateヘッダから得たサーバ時刻のUTC epoch。取れなければ0
     std::string location;     // 3xxのときのLocationヘッダ(認証リダイレクトの切り分け用)
 };
 

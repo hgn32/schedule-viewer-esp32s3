@@ -5,8 +5,6 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 
-#include "time_util.h"
-
 // 本文の既定の上限。PSRAMがあるので余裕はあるが、
 // 認証リダイレクト先のHTMLなど想定外の巨大レスポンスで詰まらないよう蓋をする。
 static const size_t DEFAULT_MAX_BODY = 64 * 1024;
@@ -25,13 +23,7 @@ esp_err_t onHttpEvent(esp_http_client_event_t* evt) {
     switch (evt->event_id) {
         case HTTP_EVENT_ON_HEADER:
             if (evt->header_key == nullptr || evt->header_value == nullptr) break;
-            // Dateヘッダはサーバの現在時刻。RTCが飛んでいるときの時刻源に使う。
-            if (strcasecmp(evt->header_key, "Date") == 0) {
-                uint32_t epoch = 0;
-                if (parseHttpDate(evt->header_value, &epoch)) {
-                    ctx->out->date_utc = epoch;
-                }
-            } else if (strcasecmp(evt->header_key, "Location") == 0) {
+            if (strcasecmp(evt->header_key, "Location") == 0) {
                 ctx->out->location = evt->header_value;
             }
             break;
@@ -63,8 +55,7 @@ esp_err_t httpGetJson(const char* url, HttpResponse* out, uint32_t timeout_ms,
                       size_t max_body_bytes) {
     if (url == nullptr || out == nullptr) return ESP_ERR_INVALID_ARG;
 
-    out->status   = 0;
-    out->date_utc = 0;
+    out->status = 0;
     out->body.clear();
     out->location.clear();
 

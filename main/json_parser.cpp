@@ -19,7 +19,6 @@ const char* const kStartKeys[]  = {"start", "startTime", "start_time",
 const char* const kEndKeys[]    = {"end", "endTime", "end_time",
                                    "endDateTime", "finish"};
 const char* const kLocKeys[]    = {"location", "place", "room", "locationName"};
-const char* const kNowKeys[]    = {"now", "serverTime", "currentTime", "timestamp"};
 // 表示対象から外す予定の判定に使う。
 // 中止済みの予定と終日予定は12時間タイムラインに載せない
 // (終日予定は00:00〜翌00:00の24時間枠になり、画面を丸ごと潰してしまう)。
@@ -172,8 +171,7 @@ const cJSON* findEventArray(const cJSON* root) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool parseScheduleJson(const std::string& body, ScheduleStore* store,
-                       uint32_t* server_now_utc) {
+bool parseScheduleJson(const std::string& body, ScheduleStore* store) {
     if (store == nullptr) return false;
     if (body.empty()) {
         return false;
@@ -237,12 +235,6 @@ bool parseScheduleJson(const std::string& body, ScheduleStore* store,
             toText(findByKeys(item, kLocKeys, sizeof(kLocKeys) / sizeof(kLocKeys[0]))));
 
         parsed.push_back(std::move(e));
-    }
-
-    if (server_now_utc != nullptr && cJSON_IsObject(root)) {
-        const cJSON* now = findByKeys(root, kNowKeys, sizeof(kNowKeys) / sizeof(kNowKeys[0]));
-        uint32_t epoch = 0;
-        if (toEpoch(now, &epoch)) *server_now_utc = epoch;
     }
 
     cJSON_Delete(root);

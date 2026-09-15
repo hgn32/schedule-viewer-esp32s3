@@ -29,6 +29,7 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
 | `main/json_parser.cpp/.h` | cJSONでレスポンスを`Event`へ変換。**実スキーマ未確定のため候補表で複数の形を受ける** |
 | `main/secrets.h` | SSID/パスワード/URL/ポーリング間隔。**git追跡外**。雛形は`secrets.h.example` |
 | `main/schedule.cpp/.h` | 予定データの保持と期間フィルタ。**外部依存の無い純粋なデータ構造**に寄せる |
+| `main/time_sync.cpp/.h` | SNTP(`esp_netif_sntp`)による時刻同期。時刻源はここのみで、`main.cpp`がWi-Fi接続後に呼び、同期完了まで待ってから予定取得へ進む |
 | `main/display.cpp/.h` | LovyanGFXによるLCD描画(タイムラインUI)。スプライトへ描いてフレームバッファへ転送 |
 | `main/lcd_panel.cpp/.h` | `esp_lcd`のRGBパネル初期化と、LovyanGFXの`LGFX_Device`ラッパー |
 | `main/io_ext.cpp/.h` | IO拡張チップ(CH32V003、I2C 0x24)。バックライト・各リセット・USB/CAN切替の出力制御。**扱いに癖があるので決定事項15を読むこと** |
@@ -178,7 +179,7 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
     座標(`esp_lcd_touch_get_data()`)は取得できるが使わない。タップ/ロングタップの
     判定仕様(1500ms、誤動作対策)は`docs/spec.md`。
 17. **Wi-Fiは繋がるまで諦めない。回数上限やフォールバック経路を足さないこと。**
-    RTCを搭載しておらず時刻はサーバ応答からしか得られないため、未接続のままでは
+    RTCを搭載しておらず時刻はSNTP(決定事項18)でしか得られないため、未接続のままでは
     タイムラインを描けない。したがって「接続を諦めて別のことをする」選択肢が無い。
     - 起動時: `wifiLinkConnectRound()`(スキャン+候補1巡)が失敗したら5秒待って
       繰り返す。**繰り返しは`main.cpp`側のループで行い、`wifi_link.cpp`の中で
@@ -209,3 +210,10 @@ Outlook予定表を12時間分のタイムラインとして表示するビュ�
     - ブートメッセージは**1行目が46px、2行目以降が28px**
       (`Display::FS_BOOT` / `FS_BOOT_SUB`)。補足情報が増えて行数が伸びたため、
       2行目以降を小さくしないと600x1024の画面に収まらない。
+18. **時刻源はSNTPのみ。** `main/time_sync.cpp`が`secrets.h`の`NTP_SERVER`へ
+    `esp_netif_sntp`で同期する。予定APIのJSON本文やHTTPの`Date`ヘッダからの時刻取得は
+    廃止した(旧実装)。**UDP/123が通らない、またはNTPサーバ名が解決できない環境では
+    時刻が得られず、タイムラインを表示できない**(RTC非搭載のため代替の時刻源が無い)。
+    `main.cpp`はWi-Fi接続後、`timeSyncBegin()`を呼んでから`timeSyncIsSynced()`が
+    trueになるまで待ってから予定取得へ進む。同期完了は`sync_cb`で立てたフラグで判定する
+    (`sntp_get_sync_status()`は読み出しでリセットされるため使えない)。
